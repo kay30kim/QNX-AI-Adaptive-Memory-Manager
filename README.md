@@ -1,6 +1,6 @@
 **We are building application-level middleware and developer tools that adapt cache and buffer policies in opt-in QNX 8.0 C++ applications and measure the memory–latency tradeoff.**
 
-# QNX Adaptive Memory Lab
+# QNX Adaptive Memory Manager
 
 Built for the **QNX Global Hackathon**, with AI recommendations outside the real-time execution path.
 
