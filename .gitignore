@@ -1,0 +1,6 @@
+.build/
+qnx.local.json
+__pycache__/
+measurements/
+menus/ratatui/target/
+menus/bin/
