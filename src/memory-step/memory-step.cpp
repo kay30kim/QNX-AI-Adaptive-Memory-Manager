@@ -1,47 +1,52 @@
+
 #include <iostream>
-#include <vector>
 #include <memory>
 #include <chrono>
 #include <thread>
-#include <cstring>
+#include <new>
+#include <unistd.h>
 
 int main() {
-    constexpr size_t STEP = 1 * 1024 * 1024;
-    constexpr size_t MAX_RAM = 700 * 1024 * 1024;
+    constexpr size_t MiB = 1024 * 1024;
+    constexpr size_t RAM = 700 * MiB;
+    constexpr int HOLD_SECONDS = 4;
 
-    std::vector<std::unique_ptr<char[]>> blocks;
-    size_t total = 0;
+    std::unique_ptr<unsigned char[]> memory;
 
     try {
-        blocks.reserve(MAX_RAM / STEP);
+        std::cout << "PID: " << getpid() << '\n';
+        std::cout << "Allocating 700 MiB...\n";
 
-        while (total < MAX_RAM) {
-            auto block = std::make_unique<char[]>(STEP);
-            std::memset(block.get(), 1, STEP);
+        // Allocate memory
+        memory.reset(new unsigned char[RAM]);
 
-            blocks.push_back(std::move(block));
-            total += STEP;
+        // Force physical page allocation
+        long ps = sysconf(_SC_PAGESIZE);
+        size_t page_size = ps > 0 ? static_cast<size_t>(ps) : 4096;
 
-            std::cout << "RAM allocated: "
-                      << total / (1024 * 1024)
-                      << " / 700 MiB" << std::endl;
+        volatile unsigned char* ptr = memory.get();
 
-            if (total < MAX_RAM)
-                std::this_thread::sleep_for(
-                    std::chrono::milliseconds(2000)
-                );
+        for (size_t i = 0; i < RAM; i += page_size) {
+            ptr[i] = 0xAA;
         }
+        ptr[RAM - 1] = 0xAA;
+
+        std::cout << "STEP UP: 700 MiB\n";
+
+        std::this_thread::sleep_for(
+            std::chrono::seconds(HOLD_SECONDS)
+        );
+
+        // Release memory
+        memory.reset();
+
+        std::cout << "STEP DOWN: 0 MiB\n";
 
     } catch (const std::bad_alloc&) {
-        std::cerr << "ERROR: Out of memory." << std::endl;
-
-        blocks.clear();
-        std::cout << "Memory released after the exception." << std::endl;
+        memory.reset();
+        std::cerr << "ERROR: Out of memory\n";
         return 1;
     }
-
-    blocks.clear();
-    std::cout << "Memory released. Exiting." << std::endl;
 
     return 0;
 }

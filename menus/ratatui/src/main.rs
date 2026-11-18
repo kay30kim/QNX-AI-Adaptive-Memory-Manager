@@ -302,7 +302,7 @@ fn draw(f: &mut Frame, app: &mut App) {
     let cpu = s.num("guest_cpu").map(|c| format!("  CPU {c:.1}%")).unwrap_or_default();
     left.push(format!("  Backend: {}{}", if app.connected { s.get("backend") } else { "connecting..." }, cpu));
     left.push(separator_line);
-    left.push(if tree { "  SRC TREE  Up/Down Enter Esc".into() } else { format!("  PROGRAMS  [{}] (number + Enter)", if s.flag("busy") { "BUSY" } else { "READY" }) });
+    left.push(if tree { "  SRC TREE  Up/Down Enter Esc".into() } else if s.flag("busy") { "  PROGRAMS  [BUSY] K/Ctrl+C: stop".into() } else { "  PROGRAMS  [READY] (number + Enter)".into() });
     let page_size = height.saturating_sub(22).max(1);
     app.max_page = s.sources.len().div_ceil(page_size).saturating_sub(1);
     app.page = app.page.min(app.max_page);
@@ -474,7 +474,7 @@ fn draw(f: &mut Frame, app: &mut App) {
     }
     f.render_widget(Paragraph::new(right), Rect::new(right_x as u16, 0, right_width as u16, rows as u16));
 
-    let status = if app.connected { " Ratatui front end  |  engine: menu.ps1 -Serve  |  Ctrl+C quits" } else { " Ratatui front end  |  starting engine (menu.ps1 -Serve)..." };
+    let status = if app.connected { " Ratatui front end  |  engine: menu.ps1 -Serve  |  Ctrl+C: stop task / quit" } else { " Ratatui front end  |  starting engine (menu.ps1 -Serve)..." };
     f.render_widget(Paragraph::new(styled(cut(status, width), Color::DarkGray)), Rect::new(0, rows as u16, width as u16, 1));
     f.set_cursor_position(((cursor.1.min(width - 1)) as u16, cursor.0 as u16));
 }
@@ -503,7 +503,10 @@ fn submit(app: &mut App, engine: &mut Engine) {
 }
 
 fn handle_key(app: &mut App, engine: &mut Engine, key: KeyEvent) {
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') { app.quit = true; return; }
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        if app.snap.flag("busy") { engine.send("stop", ""); } else { app.quit = true; } // stop the task, or quit when idle
+        return;
+    }
     let page = app.height.saturating_sub(4).max(1);
     let tree = app.snap.flag("tree");
     if key.code == KeyCode::Tab {

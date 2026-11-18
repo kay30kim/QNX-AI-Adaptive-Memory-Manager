@@ -278,6 +278,7 @@ function Poll-Captured($job) {
             }
             if ($null -eq $value) { $job[$stream] = $null; break }
             if ($job.kind -eq 'prepare' -and $value -match '^QNX_PREPARED_PATH=(/tmp/qnx-menu-[0-9a-f]{32})$') { $job.remote = $matches[1] }
+            elseif ($job.kind -eq 'prepare' -and $value -match '^QNX_UPLOAD_PATH=(/tmp/qnx-menu-[0-9a-f]{32})$') { $job.uploading = $matches[1] }
             else { Add-Log $value }
             $reader = if ($stream -eq 'out') { $job.process.StandardOutput } else { $job.process.StandardError }
             $job[$stream] = $reader.ReadLineAsync()
@@ -291,6 +292,40 @@ function Poll-Captured($job) {
         return $true
     }
     return $false
+}
+# Stops the running task (K + Enter, Ctrl+C, or "stop" from a front end).
+# - Program running in QNX: first Ctrl+C through the remote terminal (SIGINT), so the wrapper still
+#   removes the uploaded binary; if it is still running 3 s later it is forced (see Step-Engine).
+# - Forced, or any other task (build/upload, VBoxManage, ssh): the whole local process tree is killed;
+#   for a remote program the QNX process is killed too and its binary removed.
+function Stop-Task([switch]$Force) {
+    $job = $script:task
+    if (-not $job) { Add-Log '[nothing is running]'; return }
+    if ($job.process.HasExited) { return }
+    if (-not $Force -and $job.kind -eq 'interactive' -and -not $job.stopRequested) {
+        try {
+            $job.process.StandardInput.Write([char]3); $job.process.StandardInput.Flush()
+            $job.stopRequested = [datetime]::UtcNow
+            Add-Log '[stop: Ctrl+C (SIGINT) sent to the remote program; forced in 3 s if it is still running]'
+            return
+        } catch { }
+    }
+    $job.stopped = $true
+    $remote = if ($job.kind -eq 'interactive') { $script:programRemote } elseif ($job.kind -eq 'prepare') { [string]$job.uploading } else { '' }
+    # taskkill runs as a plain process: its stderr (e.g. a child that already exited) must not become a PowerShell error.
+    $kill = New-Object Diagnostics.ProcessStartInfo 'taskkill.exe', "/T /F /PID $($job.process.Id)"
+    $kill.UseShellExecute = $false; $kill.CreateNoWindow = $true; $kill.RedirectStandardOutput = $true; $kill.RedirectStandardError = $true
+    try { $killer = [Diagnostics.Process]::Start($kill); [void]$killer.WaitForExit(5000) } catch { }
+    try { if (-not $job.process.HasExited) { $job.process.Kill() } } catch { }
+    Add-Log "[stop: $($job.kind) task terminated (taskkill /T /F /PID $($job.process.Id))]"
+    if ($remote -match '^/tmp/qnx-menu-[0-9a-f]{32}$' -and $script:address -match '^[a-zA-Z0-9.:-]+$') {
+        # pidin %N keeps only the end of the path, so the process is found by suffix (at least 8 characters).
+        $cleanup = 'pidin -F "%a %N" | while read pid name; do case "' + $remote + '" in *"$name") [ ${#name} -ge 8 ] && kill -9 $pid;; esac; done; rm -f ' + $remote
+        $start = New-Object Diagnostics.ProcessStartInfo 'ssh.exe', "-o BatchMode=yes -o ConnectTimeout=3 -o MACs=hmac-sha2-512 -o LogLevel=ERROR -p $($Config.Port) $($Config.User)@$($script:address) $(Quote-WindowsArgument $cleanup)"
+        $start.UseShellExecute = $false; $start.CreateNoWindow = $true
+        [void][Diagnostics.Process]::Start($start)
+        Add-Log "+ ssh $($Config.User)@$($script:address) kill -9 <program>; rm -f $remote"
+    }
 }
 function Start-Program([string]$path) {
         if ($script:task) { Add-Log '[a command is already running]'; return }
@@ -312,6 +347,7 @@ function Start-Action([string]$choice) {
     }
     switch ($choice.ToUpperInvariant()) {
         'Q' { $script:quitting = $true }
+        'K' { Stop-Task }
         'I' {
             if ($script:task) { Add-Log '[a command is already running]'; return }
             if ($script:info.VMState -eq 'running') { Add-Log '[VM is already running]'; return }
@@ -466,7 +502,7 @@ function Render {
     $cpuText = if ($g -and $null -ne $g.CpuMean) { '  CPU {0:N1}%' -f $g.CpuMean } else { '' }
     $left.Add(('  Backend: {0}{1}' -f $script:info.Backend, $cpuText))
     $left.Add('  ----------------------------------------')
-    if ($script:treeMode) { $left.Add('  SRC TREE  Up/Down Enter Esc') } else { $left.Add("  PROGRAMS  [$activity] (number + Enter)") }
+    if ($script:treeMode) { $left.Add('  SRC TREE  Up/Down Enter Esc') } elseif ($script:task) { $left.Add('  PROGRAMS  [BUSY] K/Ctrl+C: stop') } else { $left.Add('  PROGRAMS  [READY] (number + Enter)') }
     $pageSize = [math]::Max(1, $height - 22)
     $maxPage = [math]::Max(0, [math]::Ceiling($script:sources.Count / $pageSize) - 1)
     $script:maxPage = $maxPage
@@ -636,12 +672,16 @@ function Step-Engine {
         if ($script:treeMode) { Refresh-Tree }
         $script:nextDiscovery = $now.AddSeconds(5)
     }
+    if ($script:task -and $script:task.stopRequested -and -not $script:task.stopped -and ([datetime]::UtcNow - $script:task.stopRequested).TotalSeconds -gt 3) {
+        Add-Log '[stop: the program ignored Ctrl+C; forcing it]'; try { Stop-Task -Force } catch { Add-Log "[error: $_]"; $script:task.stopped = $true }
+    }
     if ($script:task -and (Poll-Captured $script:task)) {
         $finished = $script:task; $script:task = $null; $script:nextDiscovery = [datetime]::MinValue
         if ($finished.kind -eq 'prepare') {
-            if ($finished.exitCode -eq 0 -and $finished.remote) {
+            if ($finished.stopped) { Add-Log '[build/upload stopped]' }
+            elseif ($finished.exitCode -eq 0 -and $finished.remote) {
                 $remote = $finished.remote
-                $command = "chmod 700 $remote && $remote; result=`$?; rm -f $remote; exit `$result"
+                $command = Get-RemoteRunCommand $remote
                 Add-Log "+ ssh -tt $($Config.User)@$($script:address) $command"
                 $script:task = Start-Remote $command
                 $script:programRemote = $remote; $script:program = $null; $script:programPeakData = $null; $script:programPeakHeap = $null
@@ -748,13 +788,16 @@ function Get-ServeFrame {
 function Invoke-ServeCommand([string]$line) {
     $parts = $line.Split([char[]]@([char]9), 2)
     $argument = if ($parts.Count -gt 1) { $parts[1] } else { '' }
-    switch ($parts[0]) {
-        'submit' { $script:inputText = $argument; try { Submit-Input } catch { Add-Log "[error: $_]"; $script:inputMode = 'command' } }
-        'escape' { $script:inputText = ''; $script:inputMode = 'command' }
-        'program' { $null = Send-ProgramInput $argument }
-        'tree' { Invoke-TreeKey $argument }
-        'quit' { $script:quitting = $true }
-    }
+    try {   # a failing command is logged; it must never stop the engine
+        switch ($parts[0]) {
+            'submit' { $script:inputText = $argument; Submit-Input }
+            'escape' { $script:inputText = ''; $script:inputMode = 'command' }
+            'program' { $null = Send-ProgramInput $argument }
+            'tree' { Invoke-TreeKey $argument }
+            'quit' { $script:quitting = $true }
+            'stop' { Stop-Task }
+        }
+    } catch { Add-Log "[error: $_]"; $script:inputMode = 'command' }
 }
 function Start-Serve {
     $stdin = New-Object IO.StreamReader([Console]::OpenStandardInput(), (New-Object Text.UTF8Encoding($false)))
@@ -781,6 +824,7 @@ try {
     } else {
         $script:originalOutputEncoding = [Console]::OutputEncoding
         [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)   # the OEM code page lacks the trend characters
+        [Console]::TreatControlCAsInput = $true   # Ctrl+C stops the running task instead of killing the dashboard
         [Console]::Clear()
     }
     Add-Log '[dashboard started]'
@@ -795,6 +839,10 @@ try {
         Render
         while ([Console]::KeyAvailable) {
             $key = [Console]::ReadKey($true)
+            if ($key.Key -eq 'C' -and ($key.Modifiers -band [ConsoleModifiers]::Control)) {
+                if ($script:task) { try { Stop-Task } catch { Add-Log "[error: $_]" } } else { $script:quitting = $true }   # Ctrl+C: stop the task, or quit when idle
+                continue
+            }
             if ($key.Key -eq 'Tab') {
                 if ($script:focus -eq 'program') { $script:focus = 'menu' }
                 elseif ($script:task -and $script:task.input -and -not $script:treeMode) { $script:focus = 'program'; $script:logTop = $null }
@@ -838,10 +886,13 @@ try {
         Start-Sleep -Milliseconds 100
     }
 } finally {
+    # Closing with a program still running in QNX: stop it there and remove its binary.
+    if ($script:task -and $script:task.kind -eq 'interactive' -and -not $script:task.process.HasExited) { try { Stop-Task -Force } catch { } }
     foreach ($job in @($script:task)) { if ($job) { if (-not $job.process.HasExited) { $job.process.Kill() }; $job.process.Dispose() } }
     Stop-GuestProbe
     if (-not $script:serve) {
         [Console]::ResetColor(); [Console]::Clear()
         if ($script:originalOutputEncoding) { [Console]::OutputEncoding = $script:originalOutputEncoding }
+        [Console]::TreatControlCAsInput = $false
     }
 }

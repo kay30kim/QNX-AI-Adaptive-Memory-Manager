@@ -222,7 +222,7 @@ Element render(const EngineState& st, Ui& ui) {
     left.push_back(s.has("host_resident") ? fmt("  VM HOST  %.0f MiB resident", s.num("host_resident")) : std::string("  VM HOST  unavailable"));
     left.push_back("  Backend: " + (st.connected ? s.get("backend") : std::string("connecting...")) + (s.has("guest_cpu") ? fmt("  CPU %.1f%%", s.num("guest_cpu")) : std::string()));
     left.push_back(separator_line);
-    left.push_back(tree ? std::string("  SRC TREE  Up/Down Enter Esc") : std::string("  PROGRAMS  [") + (s.flag("busy") ? "BUSY" : "READY") + "] (number + Enter)");
+    left.push_back(tree ? std::string("  SRC TREE  Up/Down Enter Esc") : s.flag("busy") ? std::string("  PROGRAMS  [BUSY] K/Ctrl+C: stop") : std::string("  PROGRAMS  [READY] (number + Enter)"));
     int page_size = std::max(1, height - 22);
     ui.max_page = std::max(0, (static_cast<int>(s.sources.size()) + page_size - 1) / page_size - 1);
     ui.page = std::min(ui.page, ui.max_page);
@@ -364,7 +364,7 @@ Element render(const EngineState& st, Ui& ui) {
     }
     columns.push_back(vbox(std::move(right)) | size(WIDTH, EQUAL, right_width));
 
-    std::string status = st.connected ? " FTXUI front end  |  engine: menu.ps1 -Serve  |  Ctrl+C quits" : " FTXUI front end  |  starting engine (menu.ps1 -Serve)...";
+    std::string status = st.connected ? " FTXUI front end  |  engine: menu.ps1 -Serve  |  Ctrl+C: stop task / quit" : " FTXUI front end  |  starting engine (menu.ps1 -Serve)...";
     return vbox({hbox(std::move(columns)) | size(HEIGHT, EQUAL, rows), line(u8take(status, width), kDark)});
 }
 
@@ -386,7 +386,10 @@ void submit(Ui& ui, Engine& engine, const Snapshot& s) {
 }
 
 void handle(const Event& event, Ui& ui, Engine& engine, const Snapshot& s) {
-    if (event == Event::CtrlC) { ui.quit = true; return; }
+    if (event == Event::CtrlC) {  // stop the task, or quit when idle
+        if (s.flag("busy")) engine.send("stop"); else ui.quit = true;
+        return;
+    }
     size_t page = static_cast<size_t>(std::max(1, ui.height - 4));
     bool tree = s.flag("tree");
     if (event == Event::Tab) {

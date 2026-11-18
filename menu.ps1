@@ -179,6 +179,15 @@ function Invoke-Guest([string]$address, [string]$command, [switch]$Interactive) 
     & ssh @SshOptions @batch -p $Config.Port "$($Config.User)@$address" $command
     if ($LASTEXITCODE -ne 0) { throw "SSH failed (exit $LASTEXITCODE). Check the address, port and credentials." }
 }
+# Runs an uploaded binary and always removes it: the EXIT trap deletes it on a normal exit, and the
+# INT/HUP/TERM traps turn Ctrl+C, a dropped SSH session or a kill into an exit that runs the EXIT trap.
+# (Traps, unlike ignored signals, are reset in the program, so it still receives Ctrl+C normally.)
+# /tmp on QNX is small (/data, 63 MB) and each static binary is ~8 MB, so leftovers fill it quickly.
+function Get-RemoteRunCommand([string]$remote) {
+    return "trap 'rm -f $remote' EXIT; trap 'exit 130' INT HUP TERM; chmod 700 $remote && $remote"
+}
+# Removes binaries left by earlier runs (older than 10 minutes, owned by the SSH user).
+function Get-RemoteCleanupCommand { return "find /tmp/ -maxdepth 1 -name 'qnx-menu-*' -user $($Config.User) -mmin +10 -delete" }
 function Run-Source($source, [string]$address) {
     if (-not $address) { throw 'No guest IP detected. Set Host/Port with option C in the dashboard or in qnx.local.json.' }
     if ($address -notmatch '^[a-zA-Z0-9.:-]+$' -or $Config.User -notmatch '^[a-zA-Z0-9_.-]+$') { throw 'Invalid SSH address or username.' }
@@ -197,10 +206,17 @@ function Run-Source($source, [string]$address) {
     $remote = '/tmp/qnx-menu-' + [guid]::NewGuid().ToString('N')
     Write-Host "+ scp -o MACs=hmac-sha2-512 -P $($Config.Port) $exe $($Config.User)@${address}:$remote" -ForegroundColor Cyan
     $batchOption = if ($NonInteractive) { @('-o', 'BatchMode=yes') } else { @() }
+    if ($Prepare) { Write-Output "QNX_UPLOAD_PATH=$remote" }   # lets the dashboard remove a partial upload if it is stopped
+    $cleanup = Get-RemoteCleanupCommand
+    Write-Host "+ ssh $($Config.User)@$address $cleanup" -ForegroundColor Cyan
+    & ssh @SshOptions -o BatchMode=yes -p $Config.Port "$($Config.User)@$address" $cleanup
     & scp @SshOptions @batchOption -P $Config.Port -- $exe "$($Config.User)@${address}:$remote"
-    if ($LASTEXITCODE -ne 0) { throw 'SCP transfer failed.' }
+    if ($LASTEXITCODE -ne 0) {
+        & ssh @SshOptions -o BatchMode=yes -p $Config.Port "$($Config.User)@$address" "rm -f $remote" 2>$null   # no partial file left behind
+        throw 'SCP transfer failed. If QNX /tmp is full, check it with: df -h /tmp'
+    }
     if ($Prepare) { Write-Output "QNX_PREPARED_PATH=$remote"; return }
-    Invoke-Guest $address "chmod 700 $remote && $remote; result=`$?; rm -f $remote; exit `$result" -Interactive:(-not $NonInteractive)
+    Invoke-Guest $address (Get-RemoteRunCommand $remote) -Interactive:(-not $NonInteractive)
 }
 if ($Run) {
     $info = Get-VmInfo; $address = Get-GuestAddress $info

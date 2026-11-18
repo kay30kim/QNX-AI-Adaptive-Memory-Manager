@@ -69,6 +69,7 @@ The file has only these columns:
 | `I` | Start the VM (VirtualBox, or QEMU with `QemuExecutable`) |
 | `C` | Set host, user, port and VM |
 | `V` | Show hypervisor diagnostics |
+| `K` or Ctrl+C | Stop the running task. A program in QNX first gets Ctrl+C (SIGINT); after 3 s it is forced with `kill -9` and its binary is removed. A build, upload or other command has its whole process tree killed. With nothing running, Ctrl+C quits. |
 | `Q` | Quit |
 
 Up/Down, PgUp/PgDn and End scroll the output pane.
@@ -113,7 +114,7 @@ Each executable looks for `menu.ps1` in `QNX_ROOT`, then in its own folder and t
 ### Engine protocol (`menu.ps1 -Serve`)
 
 - **stdout:** `@@LOG<TAB>kind<TAB>text` lines (kind is `cmd`, `err`, `ok` or `text`), and state blocks from `@@FRAME` to `@@END` made of `key<TAB>value` lines, such as `state`, `guest_used`, `core`, `hist`, `program_heap`, `host_resident`, `src` or `node`. A block is sent only when the state changes.
-- **stdin:** `submit<TAB>text`, which is the same as typing in the Select prompt, plus `escape`, `program<TAB>text`, `tree<TAB>up|down|left|right|enter|esc` and `quit`. Closing stdin also stops the engine.
+- **stdin:** `submit<TAB>text`, which is the same as typing in the Select prompt, plus `escape`, `stop`, `program<TAB>text`, `tree<TAB>up|down|left|right|enter|esc` and `quit`. Closing stdin also stops the engine.
 
 ### Building
 
