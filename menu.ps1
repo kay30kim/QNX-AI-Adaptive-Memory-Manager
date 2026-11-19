@@ -179,12 +179,15 @@ function Invoke-Guest([string]$address, [string]$command, [switch]$Interactive) 
     & ssh @SshOptions @batch -p $Config.Port "$($Config.User)@$address" $command
     if ($LASTEXITCODE -ne 0) { throw "SSH failed (exit $LASTEXITCODE). Check the address, port and credentials." }
 }
-# Runs an uploaded binary and always removes it: the EXIT trap deletes it on a normal exit, and the
-# INT/HUP/TERM traps turn Ctrl+C, a dropped SSH session or a kill into an exit that runs the EXIT trap.
-# (Traps, unlike ignored signals, are reset in the program, so it still receives Ctrl+C normally.)
+# Runs an uploaded binary and always removes it with the EXIT trap:
+# - normal exit: the shell exits with the program's status, which runs the EXIT trap;
+# - Ctrl+C: the INT trap is a no-op, so the shell waits for the program and keeps its exit status
+#   (0 when the program handles SIGINT and exits cleanly, 130 when SIGINT kills it);
+# - dropped SSH session or kill: the HUP/TERM traps exit, which runs the EXIT trap.
+# Traps, unlike ignored signals, are reset in the program, so it still receives Ctrl+C normally.
 # /tmp on QNX is small (/data, 63 MB) and each static binary is ~8 MB, so leftovers fill it quickly.
 function Get-RemoteRunCommand([string]$remote) {
-    return "trap 'rm -f $remote' EXIT; trap 'exit 130' INT HUP TERM; chmod 700 $remote && $remote"
+    return "trap 'rm -f $remote' EXIT; trap ':' INT; trap 'exit 129' HUP; trap 'exit 143' TERM; chmod 700 $remote && $remote"
 }
 # Removes binaries left by earlier runs (older than 10 minutes, owned by the SSH user).
 function Get-RemoteCleanupCommand { return "find /tmp/ -maxdepth 1 -name 'qnx-menu-*' -user $($Config.User) -mmin +10 -delete" }
