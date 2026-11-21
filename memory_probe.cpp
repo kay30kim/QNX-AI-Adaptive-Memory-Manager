@@ -9,6 +9,14 @@ static void observe(const char* stage, size_t live_bytes)
 {
     std::printf("\n=== %s ===\nApp live buffers: %zu MiB; PID: %ld\n",
                 stage, live_bytes / (1024 * 1024), static_cast<long>(getpid()));
+    // Read system-wide available RAM again at each observation stage.
+    struct stat memory_info = {};
+    if (stat("/proc", &memory_info) == -1) {
+        std::perror("Cannot read available RAM");
+    } else {
+        std::printf("System available RAM: %.2f MiB\n",
+                    static_cast<double>(memory_info.st_size) / (1024 * 1024));
+    }
     std::fflush(stdout);
     char command[96];
     std::snprintf(command, sizeof(command), "pidin -p %ld mem",
@@ -23,15 +31,6 @@ static void observe(const char* stage, size_t live_bytes)
 
 int main()
 {
-    // QNX exposes system-wide available RAM through /proc's st_size.
-    struct stat memory_info = {};
-    if (stat("/proc", &memory_info) == -1) {
-        std::perror("Cannot read available RAM");
-        return 1;
-    }
-    std::printf("System available RAM: %.2f MiB\n",
-                static_cast<double>(memory_info.st_size) / (1024 * 1024));
-
     constexpr size_t block_bytes = 8 * 1024 * 1024;
     constexpr size_t block_count = 4;
     void* blocks[block_count] = {};
