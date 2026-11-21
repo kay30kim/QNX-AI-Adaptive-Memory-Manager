@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include <cstdio>
 #include <cstdlib>
+#include <sys/stat.h>
 #include <unistd.h>
 
 // These counters describe our requested buffers, not total process memory.
@@ -22,6 +23,15 @@ static void observe(const char* stage, size_t live_bytes)
 
 int main()
 {
+    // QNX exposes system-wide available RAM through /proc's st_size.
+    struct stat memory_info = {};
+    if (stat("/proc", &memory_info) == -1) {
+        std::perror("Cannot read available RAM");
+        return 1;
+    }
+    std::printf("System available RAM: %.2f MiB\n",
+                static_cast<double>(memory_info.st_size) / (1024 * 1024));
+
     constexpr size_t block_bytes = 8 * 1024 * 1024;
     constexpr size_t block_count = 4;
     void* blocks[block_count] = {};
