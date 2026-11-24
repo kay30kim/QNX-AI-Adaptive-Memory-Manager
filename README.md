@@ -6,6 +6,47 @@ To choose between the dashboard and its compiled versions with the same layout (
 
 Setup, guest and host memory telemetry, QEMU/VirtualBox settings, keyboard controls and building the alternative interfaces are documented in [menus/README.md](menus/README.md).
 
+## Repository layout
+
+```text
+src/                         QNX target programs (one executable per .cpp)
+  probes/memory_probe.cpp    Interactive allocation and memory inspection
+  workloads/                Repeatable memory workloads: workload, fm, ramp, step
+  examples/                 Hello World and interactive input examples
+menus/                      Windows host dashboard and compiled front ends
+  ftxui/
+    src/                    C++ front-end implementation
+    include/                C++ front-end headers
+    CMakeLists.txt
+  ratatui/src/               Rust front-end implementation
+scripts/                    QNX build and VM launch scripts
+docs/                       Project planning documents
+config/                     Saved configuration assets
+menu.ps1                    Main dashboard entry point
+menu-opciones.ps1           Interface selector entry point
+```
+
+The dashboard discovers runnable QNX programs recursively under `src/`.
+The Windows front ends stay under `menus/` so they are not offered as QNX
+programs. Headers live with their owning component; there are no shared QNX
+headers yet, so a top-level `include/` is not needed. The `src/examples/`
+programs are manual examples, not an automated test suite.
+
+Run a target program through the dashboard from the repository root:
+
+```powershell
+.\menu.ps1 -Run src\probes\memory_probe.cpp
+.\menu.ps1 -Run src\workloads\memory_workload.cpp
+```
+
+For the standalone workload VM image, use
+`.\scripts\run-memory-workload.cmd` (or add `--build-only` to skip QEMU).
+This script expects `qnx800/` and `qnx-hello-vm/` alongside this repository.
+Generated builds and recordings remain in the ignored `.build/`,
+`menus/bin/`, and `measurements/` directories. Local dashboard settings remain
+in the ignored root `qnx.local.json`. `config/imgui.ini` preserves an existing
+ImGui layout; the current dashboard front ends do not load it.
+
 ## Project and plan
 
 **We are building application-level middleware and developer tools that adapt cache and buffer policies in opt-in QNX 8.0 C++ applications and measure the memory–latency tradeoff.**
@@ -123,6 +164,6 @@ Each week has two 3-day sprints and one shared review/buffer day. All dates are 
 
 **Dec 12–14:** Verify public links and submit. **Official deadline: Dec 15, 11:00 a.m. PST.**
 
-Sprint progress map: [QNX Sprint Progress Map](QNX_Sprint_Progress_Map.pdf).
+Sprint progress map: [QNX Sprint Progress Map](docs/QNX_Sprint_Progress_Map.pdf).
 
 [Hackathon](https://qnx.devpost.com/) · [Rules](https://qnx.devpost.com/rules) · [QNX Everywhere](https://qnx.software/en/developers/get-started/qnx-everywhere)

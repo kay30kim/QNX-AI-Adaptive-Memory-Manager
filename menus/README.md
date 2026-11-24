@@ -45,7 +45,7 @@ The file has only these columns:
 | Column | Meaning | Exactness |
 | --- | --- | --- |
 | `timestamp_utc` | Time of the QNX sample, or of the host sample when there is no guest sample. | |
-| `program` | `src`-relative path of the program launched from the menu, such as `src\memory-ramp\memory-ramp.cpp`. Empty when none is running. | |
+| `program` | `src`-relative path of the program launched from the menu, such as `src\workloads\memory_ramp.cpp`. Empty when none is running. | |
 | `guest_used_bytes`, `guest_free_bytes` | QNX RAM used and free. Total = used + free. | Exact: `/proc/vm/stats` page counters × page size |
 | `guest_cpu_busy_percent` | Mean CPU busy over all cores. | Exact mean of what `top` reports: 100 − idle % per core, 0.1 % resolution, 1 s window. Changes once per second. |
 | `program_heap_bytes` | Heap of the launched program. | Exact when `pidin` prints it in bytes or `K`. Empty when `pidin` rounds it to `M` or `G`. |
@@ -94,6 +94,11 @@ SSH must work without a password prompt (key-based authentication).
 | --- | --- | --- |
 | `ratatui/` | [Ratatui](https://ratatui.rs) | Rust |
 | `ftxui/` | [FTXUI](https://github.com/ArthurSonzogni/FTXUI) | C++ |
+
+FTXUI keeps its C++ implementation in `ftxui/src/` and its private headers in
+`ftxui/include/`; CMake supplies the header search path. Ratatui uses its
+standard Cargo layout in `ratatui/src/`. Both are host programs, separate
+from the QNX target programs in the repository's top-level `src/` directory.
 
 Both front ends have the same layout and keys as the dashboard:
 - **Left column:** logo, target, address, guest and host RAM, programs and prompt.

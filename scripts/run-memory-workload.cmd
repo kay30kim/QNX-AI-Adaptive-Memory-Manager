@@ -2,10 +2,10 @@
 setlocal
 rem Use --build-only to compile and prepare the image without starting QEMU.
 set "QEMU=C:\Program Files\qemu\qemu-system-x86_64.exe"
-call "%~dp0..\qnx800\qnxsdp-env.bat" >nul || exit /b 1
+call "%~dp0..\..\qnx800\qnxsdp-env.bat" >nul || exit /b 1
 @echo off
-pushd "%~dp0..\qnx-hello-vm" || exit /b 1
-q++ -Vgcc_ntox86_64 -std=c++11 -Wall -Wextra -static "%~dp0memory_workload.cpp" -o output/memory_workload || goto failed
+pushd "%~dp0..\..\qnx-hello-vm" || exit /b 1
+q++ -Vgcc_ntox86_64 -std=c++11 -Wall -Wextra -static "%~dp0..\src\workloads\memory_workload.cpp" -o output/memory_workload || goto failed
 copy /y output\build\ifs.build output\build\ifs-memory-workload.build >nul || goto failed
 echo.>>output\build\ifs-memory-workload.build
 echo [uid=0 gid=0 perms=0755] /proc/boot/memory_workload=output/memory_workload>>output\build\ifs-memory-workload.build
