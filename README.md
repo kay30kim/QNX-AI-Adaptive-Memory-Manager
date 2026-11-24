@@ -419,6 +419,54 @@ flowchart TB
     T -->|"Experiment results"| B
 ```
 
+## Sprint 3, Step 5: validate and replay recordings
+
+`scripts/workload_data.py` validates workload CSV schemas 1, 2, and 3 using
+Python's standard library. `scripts/workload-data.ps1` is the PowerShell launcher.
+Run these commands from the repository directory:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\workload-data.ps1 -Action Validate
+powershell -ExecutionPolicy Bypass -File .\scripts\workload-data.ps1 -Action Replay -Latest
+```
+
+Validation defaults to `measurements/workload-*.csv`; dashboard recordings and
+`.partial` files are excluded. Use `-InputPath <file.csv>` to select a file.
+`-Latest` explicitly selects the most recently modified workload CSV.
+Validation checks columns, types, finite values, window order/timestamps,
+configuration consistency, allocation/ownership/capacity accounting, cleanup,
+and summary totals. Duplicate run IDs across a validation batch are rejected.
+Errors return a nonzero exit code and include the affected file, plus the line
+number for row-level errors. Missing metrics remain missing, rather than zero.
+
+Replay validates the entire recording before emitting JSON Lines. It emits
+measurement windows in recorded order; it does **not** rerun the QNX workload,
+reconstruct individual requests, or reproduce memory allocations. Each event
+includes its source path and typed original record. Empty CSV values become
+JSON `null`. Summary records are excluded unless `-IncludeSummary` is specified.
+Speed 0 (default) emits immediately; speed 1 follows recorded window end times;
+speed 10 runs ten times faster. Stop timed replay with Ctrl+C.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\workload-data.ps1 -Action Replay -Latest -Speed 10
+powershell -ExecutionPolicy Bypass -File .\scripts\workload-data.ps1 -Action Replay -Latest -IncludeSummary -OutputPath .\measurements\replay.jsonl
+```
+
+An existing output file is never overwritten. Interrupted replay may leave a
+partial JSONL file. Incomplete runs require `-AllowIncomplete` to inspect;
+even then, a valid final summary is required. Validation cannot verify the
+original request sequence/checksum or percentile samples from aggregates alone.
+
+Use an installed Python 3 interpreter, `-PythonExe <path-to-python.exe>`, or
+the `QNX_PYTHON` environment variable. For a local managed runtime, its absolute
+interpreter path can be stored in ignored `.build/python-runtime.txt`. That
+machine-specific setting is not committed. No third-party Python packages,
+SSH connection, or running QNX VM are needed for validation/replay.
+`menu.ps1` remains the target build/run and dashboard entry point; this step
+processes its saved recordings on the host.
+
+Host tests: `python -m unittest discover -s tests -p test_workload_data.py -v`.
+
 ## Core MVP
 
 - **Memory profiling:** Collect system/process memory usage and application counters on QNX.
