@@ -39,6 +39,14 @@ cases = {
     "conflict": "--metrics-csv --trace-only",
     "bad_id": "--run-id bad,id",
     "bad_window": "--sample-every 0",
+    "pool": "--mode pool --pool-blocks 2 --requests 200 --bytes 257 --interval-ms 0 --sample-every 35 --metrics-csv",
+    "pool_one": "--mode pool --pool-blocks 1 --requests 1 --bytes 1 --interval-ms 0 --metrics-csv",
+    "pool_burst": "--mode pool --requests 10 --bytes 257 --pattern burst --metrics-csv",
+    "pool_ramp": "--mode pool --requests 10 --bytes 257 --pattern ramp --metrics-csv",
+    "pool_trace": "--mode pool --requests 200 --bytes 257 --trace-only",
+    "bad_mode": "--mode unknown",
+    "bad_pool": "--mode pool --pool-blocks 0",
+    "large_pool": "--mode pool --pool-blocks 4097",
 }
 script = ["#!/bin/sh"]
 for name, args in cases.items():
@@ -46,7 +54,10 @@ for name, args in cases.items():
                'echo EXIT=$?', f"echo END_{name}"]
 script += ["echo BEGIN_interrupted", "/proc/boot/memory_workload --requests 10000 --interval-ms 10 --metrics-csv &",
            "child=$!", "sleep 1", "kill -INT $child", "wait $child", "echo EXIT=$?", "echo END_interrupted",
-           "echo BEGIN_unit", "/proc/boot/telemetry_test", "echo EXIT=$?", "echo END_unit", "echo STEP1_TESTS_DONE"]
+           "echo BEGIN_pool_interrupted", "/proc/boot/memory_workload --mode pool --requests 10000 --interval-ms 10 --metrics-csv &",
+           "child=$!", "sleep 1", "kill -INT $child", "wait $child", "echo EXIT=$?", "echo END_pool_interrupted",
+           "echo BEGIN_unit", "/proc/boot/telemetry_test", "echo EXIT=$?", "echo END_unit",
+           "echo BEGIN_pool_unit", "/proc/boot/pool_test", "echo EXIT=$?", "echo END_pool_unit", "echo STEP1_TESTS_DONE"]
 (BUILD / "cases.sh").write_text("\n".join(script) + "\n", encoding="ascii", newline="\n")
 base = (VM / "output/build/ifs.build").read_text()
 assert "\n/proc/boot/hello\n" in base, "Expected Hello World startup entry"
@@ -54,12 +65,15 @@ base = base.replace("\n/proc/boot/hello\n", "\n/proc/boot/sh /proc/boot/cases.sh
 base += (f"\n[uid=0 gid=0 perms=0755] /proc/boot/memory_workload={BUILD.as_posix()}/memory_workload\n"
          f"[uid=0 gid=0 perms=0444] /proc/boot/cases.sh={BUILD.as_posix()}/cases.sh\n")
 base += f"[uid=0 gid=0 perms=0755] /proc/boot/telemetry_test={BUILD.as_posix()}/telemetry_test\n"
+base += f"[uid=0 gid=0 perms=0755] /proc/boot/pool_test={BUILD.as_posix()}/pool_test\n"
 (BUILD / "test.build").write_text(base, encoding="ascii")
 batch = ["@echo off", f'call "{SDK / "qnxsdp-env.bat"}" >nul', "@echo off",
          "if errorlevel 1 exit /b 1",
          f'q++ -Vgcc_ntox86_64 -std=c++11 -Wall -Wextra -Werror -static "{ROOT / "src/workloads/memory_workload.cpp"}" -o "{BUILD / "memory_workload"}"',
          "if errorlevel 1 exit /b 1",
          f'q++ -Vgcc_ntox86_64 -std=c++11 -Wall -Wextra -Werror -static "{ROOT / "tests/workload_telemetry.cpp"}" -o "{BUILD / "telemetry_test"}"',
+         "if errorlevel 1 exit /b 1",
+         f'q++ -Vgcc_ntox86_64 -std=c++11 -Wall -Wextra -Werror -static "{ROOT / "tests/buffer_pool.cpp"}" -o "{BUILD / "pool_test"}"',
          "if errorlevel 1 exit /b 1", f'cd /d "{VM}"',
          'set "MKFS_PATH=../qnx800/target/qnx/x86_64;../qnx800/target/qnx/x86_64/boot/sys;../qnx800/target/qnx;."',
          'set "PROCESSOR=x86_64"',
@@ -89,11 +103,11 @@ with log_path.open("wb") as log:
 
 output = log_path.read_text(errors="replace").replace("\r", "")
 chunks = {}
-for name in list(cases) + ["interrupted", "unit"]:
+for name in list(cases) + ["interrupted", "pool_interrupted", "unit", "pool_unit"]:
     match = re.search(rf"BEGIN_{name}\n(.*?)END_{name}", output, re.S)
     assert match, f"Missing test output: {name}"
     chunks[name] = match.group(1)
-    expected = 2 if name in {"zero", "overflow", "negative", "missing", "unknown", "pattern", "conflict", "bad_id", "bad_window"} else (130 if name == "interrupted" else 0)
+    expected = 2 if name in {"zero", "overflow", "negative", "missing", "unknown", "pattern", "conflict", "bad_id", "bad_window", "bad_mode", "bad_pool", "large_pool"} else (130 if name.endswith("interrupted") else 0)
     assert f"EXIT={expected}\n" in chunks[name], (name, chunks[name])
 
 def rows(name):
@@ -102,6 +116,7 @@ def rows(name):
 
 steady = rows("steady")
 assert len(steady) == 200 and steady == rows("repeat")
+assert steady == rows("pool_trace")
 assert [r[1] for r in steady] != [r[1] for r in rows("seed")]
 assert all(r[0] == i and 0 <= r[1] < 64 and r[2] == 257 and r[3] == i * 10000
            for i, r in enumerate(steady))
@@ -122,7 +137,7 @@ assert "completed=5 allocations=5" in chunks["paced"]
 assert rows("one") == [[0, 0, 1, 0]]
 assert "completed=1 allocations=1 result_checksum=0" in chunks["one"]
 def metrics(name):
-    lines = [line for line in chunks[name].splitlines() if line.startswith(("schema_version,", "1,"))]
+    lines = [line for line in chunks[name].splitlines() if line.startswith(("schema_version,", "2,"))]
     return list(csv.DictReader(lines))
 
 for name in ("metrics", "metrics_paced", "metrics_one", "metrics_burst", "metrics_ramp", "interrupted"):
@@ -157,5 +172,32 @@ assert "TELEMETRY_UNIT_PASS" in chunks["unit"]
 failed = metrics("unit")[0]
 assert failed["allocation_failures"] == "1" and failed["allocations"] == "0"
 assert failed["latency_p99_us"] == failed["cache_hits"] == failed["cache_misses"] == ""
-print(f"PASS: {len(cases) + 2} QNX cases; workload reproducibility, CSV/counters, percentile reference, pacing, interruption, and invalid inputs.")
+assert "BUFFER_POOL_UNIT_PASS" in chunks["pool_unit"]
+for name in ("pool", "pool_one", "pool_burst", "pool_ramp", "pool_interrupted"):
+    data = metrics(name)
+    assert data and all(None not in r and None not in r.values() for r in data)
+    summary, windows = data[-1], data[:-1]
+    n, size = int(summary["completed"]), int(summary["block_bytes"])
+    assert summary["schema_version"] == "2" and summary["mode"] == "pool"
+    assert summary["status"] == ("interrupted" if name.endswith("interrupted") else "complete")
+    assert n > 0 and (n < 10000 if name.endswith("interrupted") else n == int(summary["configured_requests"]))
+    assert int(summary["allocation_calls"]) == int(summary["allocations"]) == 1
+    assert int(summary["frees"]) == 0 and int(summary["cleanup_frees"]) == 1
+    assert int(summary["allocated_bytes"]) == size
+    assert int(summary["pool_hits"]) == n - 1 and int(summary["pool_misses"]) == 1
+    assert int(summary["post_cleanup_owned_bytes"]) == 0
+    for r in data:
+        assert int(r["live_buffer_bytes"]) == 0 and int(r["retained_buffer_bytes"]) == size
+        assert int(r["peak_live_buffer_bytes"]) == int(r["peak_owned_buffer_bytes"]) == size
+        assert int(r["pool_capacity_bytes"]) == int(r["pool_blocks"]) * size
+        assert int(r["allocation_failures"]) == int(r["pool_exhaustions"]) == int(r["invalid_releases"]) == int(r["request_failures"]) == 0
+        assert r["cache_hits"] == r["cache_misses"] == ""
+    for field in ("completed", "allocations", "pool_hits", "pool_misses", "allocated_bytes"):
+        assert int(summary[field]) == sum(int(r[field]) for r in windows), field
+    for r in windows:
+        assert r["cleanup_frees"] == r["post_cleanup_owned_bytes"] == ""
+for pooled, baseline_name in (("pool", "metrics"), ("pool_burst", "metrics_burst"), ("pool_ramp", "metrics_ramp")):
+    for field in ("sequence_hash", "result_checksum"):
+        assert metrics(pooled)[-1][field] == metrics(baseline_name)[-1][field], (pooled, field)
+print(f"PASS: {len(cases) + 4} QNX cases; workload/CSV, pool bounds, reuse, exhaustion, allocator failure, invalid returns, cleanup, and interruption.")
 print(f"QNX log: {log_path}")

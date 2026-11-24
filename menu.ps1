@@ -242,7 +242,7 @@ function Run-Source($source, [string]$address) {
         if ($process.ExitCode -ne 0) { throw "Workload/SSH failed (exit $($process.ExitCode)). Partial output: $partial" }
         $rows = @(Import-Csv -LiteralPath $partial)
         $summary = @($rows | Where-Object { $_.row_type -eq 'summary' })
-        if ($summary.Count -ne 1 -or $summary[0].run_id -ne $runId -or $summary[0].schema_version -ne '1' -or $summary[0].status -ne 'complete') {
+        if ($summary.Count -ne 1 -or $summary[0].run_id -ne $runId -or $summary[0].schema_version -ne '2' -or $summary[0].status -ne 'complete') {
             throw "Invalid or incomplete metrics CSV: $partial"
         }
         Move-Item -LiteralPath $partial -Destination $csvPath

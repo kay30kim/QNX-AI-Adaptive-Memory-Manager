@@ -14,6 +14,8 @@ int main() {
     assert(stats.max_ns == 100000 && stats.late_p99_ns == 98000);
     assert(stats.throughput == 100 && stats.elapsed_seconds == 1);
     samples.push_back({100001, 9999999, 9999999, false});
+    samples.back().memory.allocation_calls = 1;
+    samples.back().memory.allocation_failures = 1;
     const auto failed = telemetry::summarize(samples, 100, 101, 100000, 100001);
     assert(failed.attempted == 1 && failed.completed == 0 && failed.failures == 1);
     assert(failed.p99_ns == 0 && failed.throughput == 0);

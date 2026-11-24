@@ -125,7 +125,7 @@ paths, or redirection; it is supported for direct `-Run`, not `-Prepare`.
 
 For automated verification, run `python scripts\test-memory-workload.py` with
 Python 3.10+ on Windows. It compiles with warnings as errors, boots a temporary
-QNX test image in headless QEMU, and checks 26 cases covering deterministic
+QNX test image in headless QEMU, and checks 36 cases covering deterministic
 replay, schedules, baseline results, telemetry CSV, reference percentiles,
 interruption, and invalid arguments. Build products and the guest log are under
 `.build/workload-tests/`.
@@ -171,7 +171,11 @@ runner assigns a UUID-based ID automatically. Direct QNX runs default to an ID
 made from the guest wall-clock nanoseconds and PID; a caller can supply an ID
 when coordinating records across VM restarts.
 
-### CSV schema version 1 and measurement definitions
+### CSV schema version 2 and measurement definitions
+
+Step 3 upgrades new exports to version 2: allocation counters now come from
+the active runtime, pool configuration/reuse counters are appended, and runtime
+retention is distinguished from teardown. Existing version 1 CSVs are unchanged.
 
 Each file contains `window` rows (100 attempted requests each by default, with
 a possibly shorter final window) and one `summary` row. Rows are emitted after
@@ -182,9 +186,9 @@ available at the end of the run rather than streaming live.
 | Fields | Meaning |
 | --- | --- |
 | `schema_version`, `run_id`, `row_type`, `status` | Version, run identity, window/summary, and complete/interrupted/allocation_failed |
-| `mode`, `pattern`, `seed`, `configured_requests`, `keys`, `block_bytes`, `interval_ms`, `sample_every` | Reproduction settings; mode is currently baseline |
+| `mode`, `pattern`, `seed`, `configured_requests`, `keys`, `block_bytes`, `interval_ms`, `sample_every` | Reproduction settings; mode is baseline or pool |
 | `window_index`, `start_ns`, `end_ns` | Zero-based window index (summary uses 0), monotonic offsets from run start in nanoseconds |
-| `attempted`, `completed`, `allocation_calls`, `allocations`, `frees`, `allocation_failures` | Counts within this row; summary counts cover the whole run |
+| `attempted`, `completed`, `allocation_calls`, `allocations`, `frees`, `allocation_failures` | Requests attempted/completed and actual payload allocator calls/successes/frees/failures within this row; summary covers the whole run. Pool acquire/release is not a malloc/free call |
 | `allocated_bytes` | Sum of successfully requested payload bytes; cumulative allocation volume, not resident RAM |
 | `live_buffer_bytes`, `peak_live_buffer_bytes`, `retained_buffer_bytes` | Payload bytes still in use at row boundary, maximum simultaneous live payload in this row, and idle payload retained for reuse |
 | `measurement_storage_bytes` | Reserved sample-vector backing storage; excludes statistics scratch vectors, allocator overhead, and other runtime memory |
@@ -193,6 +197,10 @@ available at the end of the run rather than streaming live.
 | `start_lateness_p99_us` | Successful request start minus scheduled start, clamped at zero; separate from service latency |
 | `cache_hits`, `cache_misses` | Empty: no cache exists yet; do not interpret as measured zero |
 | `sequence_hash`, `result_checksum` | Present on the summary only; allow input/result comparison across repeated runs |
+| `pool_blocks`, `pool_capacity_bytes`, `pool_metadata_bytes` | Configured maximum total pool blocks, payload capacity, and slot bookkeeping bytes; zero in baseline mode |
+| `pool_hits`, `pool_misses`, `pool_exhaustions`, `invalid_releases` | Idle-buffer reuses, acquires without an idle buffer, requests rejected at capacity, and rejected pointer returns. A miss may allocate, fail allocation, or exhaust capacity |
+| `request_failures`, `peak_owned_buffer_bytes` | Failed requests (including exhaustion), and peak live + retained payload bytes within the row |
+| `cleanup_frees`, `post_cleanup_owned_bytes` | Summary-only teardown frees and remaining owned payload bytes after cleanup; blank in window rows |
 
 Percentiles use nearest rank: sorted observation at `ceil(p * N)`, counting
 from 1. Summary p99 is computed from all successful requests, never averaged
@@ -215,6 +223,71 @@ not a zero-overhead profiler. `--trace` additionally includes stdout tracing in
 overall elapsed time, so do not compare its throughput against non-traced runs.
 SIGINT/SIGTERM stop after the current request and output partial statistics with
 exit code 130; a hard kill or lost transport may prevent any CSV from arriving.
+
+## Sprint 3, Step 3: bounded buffer pool
+
+`src/workloads/buffer_pool.hpp` provides a single-threaded fixed-block pool.
+`acquire()` lazily allocates a payload block or reuses an idle block;
+`release()` returns it to the pool without calling free. The block limit covers
+both checked-out and idle blocks. The pool never falls back to an unbounded
+allocation: at capacity, acquire returns null and increments `pool_exhaustions`.
+Allocator failure also returns null, but increments `allocation_failures`.
+Invalid configuration or metadata allocation failure leaves `valid()` false;
+the workload checks that before starting. Payload and metadata are accounted
+separately. No payload buffers are preallocated.
+
+In Windows PowerShell, with the existing QNX VM and SSH connection running:
+
+```powershell
+cd "C:\Users\chaeh\Desktop\Kay\QNX-AI-Adaptive-Memory-Manager"
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\measure-workload.ps1 -Mode baseline -Requests 1000
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\measure-workload.ps1 -Mode pool -PoolBlocks 8 -Requests 1000
+```
+
+Both commands use `menu.ps1` to build, upload, run, and save separate CSVs.
+For the same pattern/seed/keys/size/request count/interval, completed runs must
+have identical `sequence_hash` and `result_checksum` in both modes. The pool
+reuses storage, not computed results: every request still writes and reads the
+whole buffer. Cache hit/miss fields remain empty until Step 4.
+
+The current workload uses only one buffer at a time. For 1,000 successful
+requests with default 65,536-byte blocks, expect:
+
+| Metric | baseline | pool |
+| --- | --- | --- |
+| Actual payload allocations | 1,000 | 1 |
+| Actual payload frees during requests | 1,000 | 0 |
+| Pool hits / misses | 0 / 0 | 999 / 1 |
+| Live payload after last request | 0 | 0 |
+| Retained payload before teardown | 0 | 65,536 bytes |
+| Teardown frees / remaining owned payload | 0 / 0 | 1 / 0 |
+
+`-PoolBlocks` (1-4096, default 8) controls the cap, not the amount allocated.
+Values above 1 do not change this serial workload's working set; simultaneous
+leases, exhaustion, and foreign/double/null returns are tested by the pool unit
+test. This step does not claim that pool mode reduces RSS or improves p99: it
+trades retained storage for fewer allocator calls, and timing must be compared
+using actual repeated runs.
+
+Pointers belong to the pool, must not be freed by callers, and must be returned
+exactly once. A returned pointer is invalid for the caller even if a later
+acquire reuses the same address; raw pointers do not detect stale aliases after
+reacquisition. Buffers retain old contents until overwritten. All clients must
+stop using pointers before `clear()` or destruction. Cleanup releases every
+owned block (including outstanding leases) and is idempotent. The workload
+explicitly clears the pool after timing ends and reports cleanup separately;
+normal and interrupted runs leave no payload blocks owned by the pool.
+
+Dashboard program 7 retains baseline as its default for reproducibility. To
+run pool mode directly through `menu.ps1`:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\menu.ps1 -Run src\workloads\memory_workload.cpp -RunArgs "--mode pool --pool-blocks 8" -MetricsCsv
+```
+
+The QNX test suite includes pool capacity/reuse, injected allocator failure,
+invalid releases, explicit/destructor cleanup, interrupted pool runs, and
+baseline/pool output equivalence on steady, burst, and ramp workloads.
 
 ## Project and plan
 
