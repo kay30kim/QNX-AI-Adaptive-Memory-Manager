@@ -47,6 +47,88 @@ Generated builds and recordings remain in the ignored `.build/`,
 in the ignored root `qnx.local.json`. `config/imgui.ini` preserves an existing
 ImGui layout; the current dashboard front ends do not load it.
 
+## Sprint 3, Step 1: reproducible workload
+
+`src/workloads/memory_workload.cpp` now generates seeded requests and runs a
+single-threaded allocate/fill/free baseline. Defaults: seed 42, 1,000 requests,
+64 keys, 65,536 bytes per request, and a 10 ms scheduled interval. Eighty percent
+of key selections target the first quarter of keys (the remaining selections
+cover all keys), providing reuse for the later cache implementation.
+
+From **Windows CMD**, build and start the standalone QNX VM:
+
+```bat
+cd /d C:\Users\chaeh\Desktop\Kay\QNX-AI-Adaptive-Memory-Manager
+scripts\run-memory-workload.cmd
+```
+
+This uses the sibling `qnx800` SDP and `qnx-hello-vm` image, plus QEMU at
+`C:\Program Files\qemu\qemu-system-x86_64.exe`. It does not require SSH or
+`qnx.local.json`. Wait for the QNX `#` shell prompt, press Enter if startup
+messages obscure it, then enter these commands **inside QNX**, one at a time:
+
+```sh
+/proc/boot/memory_workload --pattern steady --seed 42 --requests 1000
+/proc/boot/memory_workload --pattern burst --seed 42 --requests 1000
+/proc/boot/memory_workload --pattern ramp --seed 42 --requests 1000
+```
+
+Default runs take roughly 10, 16, and 5.5 seconds respectively, plus any workload
+or VM scheduling delay. Each reports its configuration, `sequence_hash`,
+completed requests, allocations, result checksum, and elapsed time. Repeat the
+same command: its sequence hash and result checksum should match; elapsed time
+need not match. `--help` lists all options. Exit QEMU with **Ctrl+A, then X**.
+
+Patterns change the planned arrival spacing, not allocation size:
+
+- `steady`: constant interval.
+- `burst`: in each group of 100 requests, the first 20 gaps use interval/10;
+  the remaining 80 gaps use interval*2.
+- `ramp`: ten phases decrease the interval from 100% to 10%.
+
+The first request is scheduled at time zero. The synchronous baseline waits
+until each scheduled time; if processing falls behind, requests run late without
+being dropped. This is not a concurrent load generator. `--interval-ms 0`
+disables pacing. The baseline allocates one buffer at a time, writes and reads
+every byte, then frees it; it does not yet retain a cache or pool.
+
+To inspect reproducible input, run in QNX:
+
+```sh
+/proc/boot/memory_workload --seed 42 --requests 20 --trace-only
+```
+
+CSV columns are `request_index,key,bytes,scheduled_us`; indices are zero-based,
+and `scheduled_us` is the planned offset from the start, not measured latency.
+`--trace-only` does not execute the workload. `--trace` executes it and also
+prints the CSV. Summaries go to stderr in both modes. To save a trace in QNX:
+
+```sh
+/proc/boot/memory_workload --requests 20 --trace-only > /tmp/requests.csv
+cat /tmp/requests.csv
+```
+
+That file is inside the guest. The standalone VM uses `-snapshot`, so guest
+files do not persist after QEMU exits. Trace printing affects execution time;
+use runs without `--trace` for comparisons. Detailed memory/p99/throughput CSV
+instrumentation belongs to Step 2.
+
+If a running SSH-enabled VM is already configured in `qnx.local.json`, this
+alternative **Windows CMD** command builds, uploads, and runs the workload:
+
+```bat
+powershell -NoProfile -ExecutionPolicy Bypass -File .\menu.ps1 -Run src\workloads\memory_workload.cpp -RunArgs "--pattern burst --seed 42 --requests 1000"
+```
+
+`-RunArgs` accepts simple space-separated tokens, not shell operators, quoted
+paths, or redirection; it is supported for direct `-Run`, not `-Prepare`.
+
+For automated verification, run `python scripts\test-memory-workload.py` with
+Python 3.10+ on Windows. It compiles with warnings as errors, boots a temporary
+QNX test image in headless QEMU, and checks 16 cases covering deterministic
+replay, changed seeds, all three schedules, baseline results, and invalid
+arguments. Build products and the guest log are under `.build/workload-tests/`.
+
 ## Project and plan
 
 **We are building application-level middleware and developer tools that adapt cache and buffer policies in opt-in QNX 8.0 C++ applications and measure the memory–latency tradeoff.**
