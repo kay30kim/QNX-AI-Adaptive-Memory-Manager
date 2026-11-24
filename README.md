@@ -125,7 +125,7 @@ paths, or redirection; it is supported for direct `-Run`, not `-Prepare`.
 
 For automated verification, run `python scripts\test-memory-workload.py` with
 Python 3.10+ on Windows. It compiles with warnings as errors, boots a temporary
-QNX test image in headless QEMU, and checks 36 cases covering deterministic
+QNX test image in headless QEMU, and checks 48 cases covering deterministic
 replay, schedules, baseline results, telemetry CSV, reference percentiles,
 interruption, and invalid arguments. Build products and the guest log are under
 `.build/workload-tests/`.
@@ -171,11 +171,12 @@ runner assigns a UUID-based ID automatically. Direct QNX runs default to an ID
 made from the guest wall-clock nanoseconds and PID; a caller can supply an ID
 when coordinating records across VM restarts.
 
-### CSV schema version 2 and measurement definitions
+### CSV schema version 3 and measurement definitions
 
-Step 3 upgrades new exports to version 2: allocation counters now come from
-the active runtime, pool configuration/reuse counters are appended, and runtime
-retention is distinguished from teardown. Existing version 1 CSVs are unchanged.
+Step 3 introduced actual allocator/pool counters and teardown accounting in
+version 2. Step 4 upgrades new exports to version 3 with cache configuration,
+occupancy, eviction/bypass counts, and measured cache hits/misses. Existing
+version 1/2 files are unchanged; readers must check `schema_version`.
 
 Each file contains `window` rows (100 attempted requests each by default, with
 a possibly shorter final window) and one `summary` row. Rows are emitted after
@@ -186,21 +187,24 @@ available at the end of the run rather than streaming live.
 | Fields | Meaning |
 | --- | --- |
 | `schema_version`, `run_id`, `row_type`, `status` | Version, run identity, window/summary, and complete/interrupted/allocation_failed |
-| `mode`, `pattern`, `seed`, `configured_requests`, `keys`, `block_bytes`, `interval_ms`, `sample_every` | Reproduction settings; mode is baseline or pool |
+| `mode`, `pattern`, `seed`, `configured_requests`, `keys`, `block_bytes`, `interval_ms`, `sample_every` | Reproduction settings; mode is baseline, pool, or cache |
 | `window_index`, `start_ns`, `end_ns` | Zero-based window index (summary uses 0), monotonic offsets from run start in nanoseconds |
 | `attempted`, `completed`, `allocation_calls`, `allocations`, `frees`, `allocation_failures` | Requests attempted/completed and actual payload allocator calls/successes/frees/failures within this row; summary covers the whole run. Pool acquire/release is not a malloc/free call |
 | `allocated_bytes` | Sum of successfully requested payload bytes; cumulative allocation volume, not resident RAM |
 | `live_buffer_bytes`, `peak_live_buffer_bytes`, `retained_buffer_bytes` | Payload bytes still in use at row boundary, maximum simultaneous live payload in this row, and idle payload retained for reuse |
 | `measurement_storage_bytes` | Reserved sample-vector backing storage; excludes statistics scratch vectors, allocator overhead, and other runtime memory |
 | `elapsed_seconds`, `throughput_rps` | Observed duration including pacing and in-loop measurement overhead; completed / duration |
-| `latency_p50_us`, `latency_p95_us`, `latency_p99_us`, `latency_max_us` | Successful request allocate/fill/read/free service times in microseconds; excludes pacing and request generation |
+| `latency_p50_us`, `latency_p95_us`, `latency_p99_us`, `latency_max_us` | Successful request service time in microseconds: baseline allocate/compute/free; pool acquire/compute/release; cache lookup plus any miss processing. Excludes pacing and request generation |
 | `start_lateness_p99_us` | Successful request start minus scheduled start, clamped at zero; separate from service latency |
-| `cache_hits`, `cache_misses` | Empty: no cache exists yet; do not interpret as measured zero |
+| `cache_hits`, `cache_misses` | Measured per row in cache mode; empty (not applicable) in baseline/pool modes |
 | `sequence_hash`, `result_checksum` | Present on the summary only; allow input/result comparison across repeated runs |
 | `pool_blocks`, `pool_capacity_bytes`, `pool_metadata_bytes` | Configured maximum total pool blocks, payload capacity, and slot bookkeeping bytes; zero in baseline mode |
 | `pool_hits`, `pool_misses`, `pool_exhaustions`, `invalid_releases` | Idle-buffer reuses, acquires without an idle buffer, requests rejected at capacity, and rejected pointer returns. A miss may allocate, fail allocation, or exhaust capacity |
 | `request_failures`, `peak_owned_buffer_bytes` | Failed requests (including exhaustion), and peak live + retained payload bytes within the row |
 | `cleanup_frees`, `post_cleanup_owned_bytes` | Summary-only teardown frees and remaining owned payload bytes after cleanup; blank in window rows |
+| `cache_capacity_bytes`, `cache_effective_capacity_bytes` | Configured cache payload budget, and usable budget after rounding down to whole blocks and applying the pool block cap |
+| `cache_bytes`, `cache_entries` | Cached payload bytes and entry count at the row boundary; these bytes are a subset of `live_buffer_bytes`, not additional memory |
+| `cache_evictions`, `cache_bypasses`, `cache_metadata_bytes` | LRU removals, requests computed without caching because no block fits, and cache slot bookkeeping storage |
 
 Percentiles use nearest rank: sorted observation at `ceil(p * N)`, counting
 from 1. Summary p99 is computed from all successful requests, never averaged
@@ -248,7 +252,7 @@ Both commands use `menu.ps1` to build, upload, run, and save separate CSVs.
 For the same pattern/seed/keys/size/request count/interval, completed runs must
 have identical `sequence_hash` and `result_checksum` in both modes. The pool
 reuses storage, not computed results: every request still writes and reads the
-whole buffer. Cache hit/miss fields remain empty until Step 4.
+whole buffer. Cache hit/miss fields remain empty in baseline/pool modes.
 
 The current workload uses only one buffer at a time. For 1,000 successful
 requests with default 65,536-byte blocks, expect:
@@ -288,6 +292,74 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\menu.ps1 -Run src\workload
 The QNX test suite includes pool capacity/reuse, injected allocator failure,
 invalid releases, explicit/destructor cleanup, interrupted pool runs, and
 baseline/pool output equivalence on steady, burst, and ramp workloads.
+
+## Sprint 3, Step 4: byte-bounded LRU result cache
+
+`src/workloads/bounded_cache.hpp` adds a single-threaded cache that owns its
+buffer pool. A cache entry holds one complete fixed-size computed payload, its
+key, and its result checksum. A hit refreshes the entry's LRU position and
+returns the stored checksum without filling or scanning the payload again.
+A miss acquires a pool block, computes the same payload/result as baseline,
+and stores it. Keys must identify immutable content for this cache's configured
+block size; this prototype has no TTL, invalidation API, or concurrent access.
+
+In Windows PowerShell, with the QNX VM/SSH setup still running:
+
+```powershell
+cd "C:\Users\chaeh\Desktop\Kay\QNX-AI-Adaptive-Memory-Manager"
+powershell -ExecutionPolicy Bypass -File .\scripts\measure-workload.ps1 -Mode cache -CacheBytes 524288 -PoolBlocks 8
+```
+
+For an easy hit/miss check, send 20 requests for the same key:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\measure-workload.ps1 -Mode cache -Requests 20 -Keys 1 -CacheBytes 65536 -IntervalMs 0
+```
+
+Expect one miss, 19 hits, one payload allocation, and zero owned payload bytes
+after cleanup. To compare timings/results, use baseline/pool/cache with the
+same pattern, seed, requests, keys, bytes, and interval. Completed runs must
+have the same sequence hash and result checksum. Performance improvements are
+not guaranteed; this demo's cached result is a checksum, so a cache hit does
+not copy the full payload to a caller.
+
+Direct `menu.ps1` equivalent:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\menu.ps1 -Run src\workloads\memory_workload.cpp -RunArgs "--mode cache --cache-bytes 524288 --pool-blocks 8" -MetricsCsv
+```
+
+`-CacheBytes` / `--cache-bytes` defaults to 524,288 and accepts 0 through
+4,294,967,295 bytes. The effective number of entries is
+`min(pool_blocks, floor(cache_bytes / block_bytes))`. When full, the least
+recently used entry is removed **before** acquiring its replacement, returning
+the old buffer to the pool. This avoids needing a temporary block beyond the
+pool cap. Eviction does not call free: the returned block can be reused.
+
+A budget of zero or less than one block disables retention of results while
+keeping requests functional: each is counted as a miss and bypass, computed
+using the pool, and its buffer returned. That idle pool buffer still uses
+memory, so a zero cache budget does not mean zero application RAM. The byte
+budget covers cached payload only; cache/pool metadata and telemetry storage
+are separately reported and are not included in that budget.
+
+During cache mode, pool `live_buffer_bytes` includes buffers leased to cache
+entries; `retained_buffer_bytes` means idle buffers held by the pool. Do not add
+`cache_bytes` to live bytes, because that would count the same payload twice.
+Cleanup releases all cache leases, then frees the pool's blocks. Normal and
+interrupted runs report remaining owned payload as zero after this cleanup.
+
+Lookup currently scans a bounded slot array; LRU ordering is maintained by
+index links. Metadata is allocated once during initialization, with no new
+entry allocations during requests. A compute callback must fill the block,
+must not retain its pointer, and must not throw. Allocation failure leaves no
+new entry; existing entries remain valid. Cache clear is idempotent and resets
+occupancy while preserving diagnostic counters.
+
+Tests cover exact LRU order against an independent Python model, repeated-key
+hits without recomputation, byte rounding, pool-limited capacity, zero/tiny
+budgets, allocation failure, clear/reuse/destruction, interruption, and
+baseline/pool/cache result equivalence across steady/burst/ramp workloads.
 
 ## Project and plan
 

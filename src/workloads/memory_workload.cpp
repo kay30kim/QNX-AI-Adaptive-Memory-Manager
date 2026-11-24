@@ -13,6 +13,7 @@
 #include <memory>
 #include <unistd.h>
 #include "telemetry.hpp"
+#include "bounded_cache.hpp"
 
 static volatile std::sig_atomic_t stop_requested = 0;
 static void request_stop(int) { stop_requested = 1; }
@@ -21,6 +22,7 @@ struct Options {
     const char* pattern = "steady";
     const char* mode = "baseline";
     uint32_t pool_blocks = 8;
+    uint32_t cache_bytes = 524288;
     uint32_t seed = 42, requests = 1000, keys = 64, bytes = 65536, interval_ms = 10;
     bool trace = false, trace_only = false;
     bool metrics_csv = false;
@@ -31,8 +33,9 @@ struct Options {
 static void usage() {
     std::puts("Usage: memory_workload [options]\n"
         "  --pattern steady|burst|ramp  (default steady)\n"
-        "  --mode baseline|pool        (default baseline)\n"
+        "  --mode baseline|pool|cache  (default baseline)\n"
         "  --pool-blocks N             (1..4096 total blocks; default 8)\n"
+        "  --cache-bytes N             (0..4294967295; default 524288)\n"
         "  --seed N                    (0..4294967295; default 42)\n"
         "  --requests N                (1..1000000; default 1000)\n"
         "  --keys N                    (1..1000000; default 64)\n"
@@ -70,6 +73,16 @@ static uint64_t hash_value(uint64_t hash, uint64_t value) {
     return hash;
 }
 
+static uint64_t compute_result(uint32_t key, unsigned char* raw, size_t bytes) {
+    volatile unsigned char* block = raw;
+    uint64_t sum = 0;
+    for (size_t j = 0; j < bytes; ++j) {
+        block[j] = static_cast<unsigned char>((key + j) & 255);
+        sum += block[j];
+    }
+    return sum;
+}
+
 int main(int argc, char** argv) {
     Options o;
     for (int i = 1; i < argc; ++i) {
@@ -85,9 +98,10 @@ int main(int argc, char** argv) {
             valid = !std::strcmp(value, "steady") || !std::strcmp(value, "burst") || !std::strcmp(value, "ramp");
             o.pattern = value;
         } else if (!std::strcmp(arg, "--mode")) {
-            valid = !std::strcmp(value, "baseline") || !std::strcmp(value, "pool");
+            valid = !std::strcmp(value, "baseline") || !std::strcmp(value, "pool") || !std::strcmp(value, "cache");
             o.mode = value;
         } else if (!std::strcmp(arg, "--pool-blocks")) valid = number(value, 1, 4096, o.pool_blocks);
+        else if (!std::strcmp(arg, "--cache-bytes")) valid = number(value, 0, UINT32_MAX, o.cache_bytes);
         else if (!std::strcmp(arg, "--seed")) valid = number(value, 0, UINT32_MAX, o.seed);
         else if (!std::strcmp(arg, "--requests")) valid = number(value, 1, 1000000, o.requests);
         else if (!std::strcmp(arg, "--keys")) valid = number(value, 1, 1000000, o.keys);
@@ -113,15 +127,18 @@ int main(int argc, char** argv) {
     std::signal(SIGTERM, request_stop);
     std::vector<telemetry::Sample> samples;
     std::unique_ptr<runtime::BufferPool> pool;
+    std::unique_ptr<runtime::BoundedCache> cache;
     runtime::BufferStats memory;
     try {
         if (!o.trace_only) {
             samples.reserve(o.requests);
             if (!std::strcmp(o.mode, "pool")) pool.reset(new runtime::BufferPool(o.bytes, o.pool_blocks));
+            if (!std::strcmp(o.mode, "cache")) cache.reset(new runtime::BoundedCache(o.bytes, o.pool_blocks, o.cache_bytes));
         }
     }
     catch (const std::bad_alloc&) { std::fprintf(stderr, "Cannot allocate measurement storage.\n"); return 1; }
     if (pool && !pool->valid()) { std::fprintf(stderr, "Cannot initialize buffer pool metadata.\n"); return 1; }
+    if (cache && !cache->valid()) { std::fprintf(stderr, "Cannot initialize cache/pool metadata.\n"); return 1; }
     // mt19937 plus explicit modulo mapping is stable across standard libraries.
     std::mt19937 rng(o.seed);
     uint64_t scheduled_us = 0, sequence_hash = UINT64_C(14695981039346656037);
@@ -148,47 +165,54 @@ int main(int argc, char** argv) {
         if (!o.trace_only) {
             const auto request_start = std::chrono::steady_clock::now();
             const uint64_t start_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(request_start - start).count();
-            unsigned char* raw;
-            if (pool) {
-                raw = pool->acquire();
-                memory = pool->stats();
-            } else {
-                ++memory.allocation_calls;
-                raw = static_cast<unsigned char*>(std::malloc(o.bytes));
-                if (raw) {
-                    ++memory.allocations;
-                    memory.allocated_bytes += o.bytes;
-                    memory.live_bytes += o.bytes;
-                } else ++memory.allocation_failures;
-            }
-            volatile unsigned char* block = raw;
-            const uint64_t live_peak = memory.live_bytes;
-            const uint64_t owned_peak = memory.live_bytes + memory.retained_bytes;
-            if (!block) {
-                std::fprintf(stderr, "Allocation failed: request=%u bytes=%u completed=%llu\n",
-                    i, o.bytes, static_cast<unsigned long long>(completed));
+            if (cache) {
+                uint64_t result = 0;
+                const bool success = cache->get_or_compute(key, result, compute_result);
+                memory = cache->stats();
                 const uint64_t end_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
-                samples.push_back({end_ns, end_ns - start_ns, start_ns > scheduled_us * 1000 ? start_ns - scheduled_us * 1000 : 0, false, memory, live_peak, owned_peak});
-                allocation_failed = true;
-                break;
-            }
-            // Results depend only on key/size; caching can preserve the same result.
-            uint64_t sum = 0;
-            for (uint32_t j = 0; j < o.bytes; ++j) {
-                block[j] = static_cast<unsigned char>((key + j) & 255);
-                sum += block[j];
-            }
-            result_checksum += sum;
-            if (pool) {
-                if (!pool->release(raw)) { std::fprintf(stderr, "Internal error: invalid buffer return.\n"); return 1; }
-                memory = pool->stats();
+                samples.push_back({end_ns, end_ns - start_ns, start_ns > scheduled_us * 1000 ? start_ns - scheduled_us * 1000 : 0,
+                    success, memory, cache->request_peak_live(), cache->request_peak_owned()});
+                if (!success) { std::fprintf(stderr, "Cache request failed at request %u.\n", i); allocation_failed = true; break; }
+                result_checksum += result;
             } else {
-                std::free(raw);
-                ++memory.frees;
-                memory.live_bytes -= o.bytes;
+                unsigned char* raw;
+                if (pool) {
+                    raw = pool->acquire();
+                    memory = pool->stats();
+                } else {
+                    ++memory.allocation_calls;
+                    raw = static_cast<unsigned char*>(std::malloc(o.bytes));
+                    if (raw) {
+                        ++memory.allocations;
+                        memory.allocated_bytes += o.bytes;
+                        memory.live_bytes += o.bytes;
+                    } else ++memory.allocation_failures;
+                }
+                volatile unsigned char* block = raw;
+                const uint64_t live_peak = memory.live_bytes;
+                const uint64_t owned_peak = memory.live_bytes + memory.retained_bytes;
+                if (!block) {
+                    std::fprintf(stderr, "Allocation failed: request=%u bytes=%u completed=%llu\n",
+                        i, o.bytes, static_cast<unsigned long long>(completed));
+                    const uint64_t end_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+                    samples.push_back({end_ns, end_ns - start_ns, start_ns > scheduled_us * 1000 ? start_ns - scheduled_us * 1000 : 0, false, memory, live_peak, owned_peak});
+                    allocation_failed = true;
+                    break;
+                }
+                // Results depend only on key/size; caching can preserve the same result.
+                const uint64_t sum = compute_result(key, raw, o.bytes);
+                result_checksum += sum;
+                if (pool) {
+                    if (!pool->release(raw)) { std::fprintf(stderr, "Internal error: invalid buffer return.\n"); return 1; }
+                    memory = pool->stats();
+                } else {
+                    std::free(raw);
+                    ++memory.frees;
+                    memory.live_bytes -= o.bytes;
+                }
+                const uint64_t end_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+                samples.push_back({end_ns, end_ns - start_ns, start_ns > scheduled_us * 1000 ? start_ns - scheduled_us * 1000 : 0, true, memory, live_peak, owned_peak});
             }
-            const uint64_t end_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
-            samples.push_back({end_ns, end_ns - start_ns, start_ns > scheduled_us * 1000 ? start_ns - scheduled_us * 1000 : 0, true, memory, live_peak, owned_peak});
             ++completed;
         }
         if (o.trace) std::printf("%u,%u,%u,%llu\n", i, key, o.bytes,
@@ -206,12 +230,20 @@ int main(int argc, char** argv) {
     // Capture runtime retention in samples, then free idle buffers. Cleanup is
     // outside measured service/run time and reported separately from runtime frees.
     uint64_t cleanup_frees = 0, post_cleanup_owned = 0;
-    const size_t pool_metadata = pool ? pool->metadata_bytes() : 0;
+    const size_t pool_metadata = pool ? pool->metadata_bytes() : (cache ? cache->pool_metadata_bytes() : 0);
+    const size_t cache_metadata = cache ? cache->metadata_bytes() : 0;
+    const size_t cache_effective = cache ? cache->effective_capacity_bytes() : 0;
     if (pool) {
         const uint64_t before = pool->stats().frees;
         pool->clear();
         cleanup_frees = pool->stats().frees - before;
         post_cleanup_owned = pool->stats().live_bytes + pool->stats().retained_bytes;
+    }
+    if (cache) {
+        const uint64_t before = cache->stats().frees;
+        cache->clear();
+        cleanup_frees = cache->stats().frees - before;
+        post_cleanup_owned = cache->stats().live_bytes + cache->stats().retained_bytes;
     }
     FILE* report = (o.trace || o.metrics_csv) ? stderr : stdout;
     std::fprintf(report, "mode=%s pattern=%s seed=%u requests=%u keys=%u bytes=%u interval_ms=%u\n",
@@ -234,6 +266,10 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(memory.pool_hits), static_cast<unsigned long long>(memory.pool_misses),
                 static_cast<unsigned long long>(memory.pool_exhaustions), static_cast<unsigned long long>(cleanup_frees),
                 static_cast<unsigned long long>(post_cleanup_owned));
+            if (cache) std::fprintf(report, "cache_hits=%llu cache_misses=%llu cache_evictions=%llu cache_bypasses=%llu cache_bytes=%llu cache_effective_capacity_bytes=%llu\n",
+                static_cast<unsigned long long>(memory.cache_hits), static_cast<unsigned long long>(memory.cache_misses),
+                static_cast<unsigned long long>(memory.cache_evictions), static_cast<unsigned long long>(memory.cache_bypasses),
+                static_cast<unsigned long long>(memory.cache_bytes), static_cast<unsigned long long>(cache_effective));
             if (o.metrics_csv) {
                 telemetry::csv_header(std::cout);
                 for (size_t begin = 0, window = 0; begin < samples.size(); begin += o.sample_every, ++window) {
@@ -244,12 +280,14 @@ int main(int argc, char** argv) {
                     telemetry::csv_row(std::cout, o.run_id, "window", status, o.pattern, o.seed, o.requests, o.keys,
                         o.bytes, o.interval_ms, o.sample_every, window, from, to, part,
                         samples.capacity() * sizeof(telemetry::Sample), sequence_hash, result_checksum, o.mode,
-                        pool ? o.pool_blocks : 0, pool_metadata);
+                        (pool || cache) ? o.pool_blocks : 0, pool_metadata, 0, 0,
+                        cache ? o.cache_bytes : 0, cache_effective, cache_metadata);
                 }
                 telemetry::csv_row(std::cout, o.run_id, "summary", status, o.pattern, o.seed, o.requests, o.keys,
                     o.bytes, o.interval_ms, o.sample_every, 0, 0, elapsed_ns, stats,
                     samples.capacity() * sizeof(telemetry::Sample), sequence_hash, result_checksum, o.mode,
-                    pool ? o.pool_blocks : 0, pool_metadata, cleanup_frees, post_cleanup_owned);
+                    (pool || cache) ? o.pool_blocks : 0, pool_metadata, cleanup_frees, post_cleanup_owned,
+                    cache ? o.cache_bytes : 0, cache_effective, cache_metadata);
                 std::cout.flush();
                 if (!std::cout) { std::fprintf(stderr, "Cannot write metrics CSV.\n"); return 1; }
             }

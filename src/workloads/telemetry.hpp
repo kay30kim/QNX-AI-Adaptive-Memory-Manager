@@ -61,6 +61,10 @@ inline Stats summarize(const std::vector<Sample>& samples, size_t begin, size_t 
         stats.memory.pool_misses -= before.pool_misses;
         stats.memory.pool_exhaustions -= before.pool_exhaustions;
         stats.memory.invalid_releases -= before.invalid_releases;
+        stats.memory.cache_hits -= before.cache_hits;
+        stats.memory.cache_misses -= before.cache_misses;
+        stats.memory.cache_evictions -= before.cache_evictions;
+        stats.memory.cache_bypasses -= before.cache_bypasses;
     }
     std::sort(service.begin(), service.end());
     std::sort(late.begin(), late.end());
@@ -81,7 +85,8 @@ inline void csv_header(std::ostream& out) {
            "measurement_storage_bytes,elapsed_seconds,throughput_rps,latency_p50_us,latency_p95_us,latency_p99_us,"
            "latency_max_us,start_lateness_p99_us,cache_hits,cache_misses,sequence_hash,result_checksum,"
            "pool_blocks,pool_capacity_bytes,pool_hits,pool_misses,pool_exhaustions,invalid_releases,"
-           "request_failures,peak_owned_buffer_bytes,pool_metadata_bytes,cleanup_frees,post_cleanup_owned_bytes\n";
+           "request_failures,peak_owned_buffer_bytes,pool_metadata_bytes,cleanup_frees,post_cleanup_owned_bytes,"
+           "cache_capacity_bytes,cache_effective_capacity_bytes,cache_bytes,cache_entries,cache_evictions,cache_bypasses,cache_metadata_bytes\n";
 }
 
 inline void csv_row(std::ostream& out, const char* run_id, const char* row_type, const char* status,
@@ -90,10 +95,11 @@ inline void csv_row(std::ostream& out, const char* run_id, const char* row_type,
                     uint64_t start_ns, uint64_t end_ns, const Stats& stats, size_t storage,
                     uint64_t sequence_hash, uint64_t checksum, const char* mode = "baseline",
                     uint32_t pool_blocks = 0, size_t pool_metadata = 0, uint64_t cleanup_frees = 0,
-                    uint64_t post_cleanup_owned = 0) {
+                    uint64_t post_cleanup_owned = 0, uint64_t cache_capacity = 0,
+                    uint64_t cache_effective = 0, size_t cache_metadata = 0) {
     out.imbue(std::locale::classic());
     out << std::fixed << std::setprecision(9)
-        << "2," << run_id << ',' << row_type << ',' << status << ',' << mode << ',' << pattern << ','
+        << "3," << run_id << ',' << row_type << ',' << status << ',' << mode << ',' << pattern << ','
         << seed << ',' << requested << ',' << keys << ',' << bytes << ',' << interval << ','
         << sample_every << ',' << window << ',' << start_ns << ',' << end_ns << ','
         << stats.attempted << ',' << stats.completed << ',' << stats.memory.allocation_calls << ','
@@ -105,8 +111,10 @@ inline void csv_row(std::ostream& out, const char* run_id, const char* row_type,
         out << stats.p50_ns / 1000.0 << ',' << stats.p95_ns / 1000.0 << ','
             << stats.p99_ns / 1000.0 << ',' << stats.max_ns / 1000.0 << ',' << stats.late_p99_ns / 1000.0;
     } else out << ",,,,";
-    // Cache is not implemented: empty fields explicitly mean not applicable.
-    out << ",,,";
+    out << ',';
+    if (std::string(mode) == "cache") out << stats.memory.cache_hits << ',' << stats.memory.cache_misses;
+    else out << ',';
+    out << ',';
     if (std::string(row_type) == "summary")
         out << std::hex << sequence_hash << std::dec << ',' << checksum;
     else out << ',';
@@ -115,7 +123,8 @@ inline void csv_row(std::ostream& out, const char* run_id, const char* row_type,
         << stats.memory.invalid_releases << ',' << stats.failures << ',' << stats.peak_owned << ',' << pool_metadata << ',';
     if (std::string(row_type) == "summary") out << cleanup_frees << ',' << post_cleanup_owned;
     else out << ',';
-    out << '\n';
+    out << ',' << cache_capacity << ',' << cache_effective << ',' << stats.memory.cache_bytes << ','
+        << stats.memory.cache_entries << ',' << stats.memory.cache_evictions << ',' << stats.memory.cache_bypasses << ',' << cache_metadata << '\n';
 }
 }
 #endif

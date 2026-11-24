@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import subprocess
 import time
+from collections import OrderedDict
 
 ROOT = Path(__file__).resolve().parents[1]
 VM = ROOT.parent / "qnx-hello-vm"
@@ -47,6 +48,16 @@ cases = {
     "bad_mode": "--mode unknown",
     "bad_pool": "--mode pool --pool-blocks 0",
     "large_pool": "--mode pool --pool-blocks 4097",
+    "cache": "--mode cache --cache-bytes 514 --requests 200 --bytes 257 --interval-ms 0 --sample-every 35 --metrics-csv",
+    "cache_pool_limited": "--mode cache --cache-bytes 4096 --pool-blocks 1 --requests 200 --bytes 257 --interval-ms 0 --sample-every 35 --metrics-csv",
+    "cache_zero": "--mode cache --cache-bytes 0 --requests 200 --bytes 257 --interval-ms 0 --sample-every 35 --metrics-csv",
+    "cache_tiny": "--mode cache --cache-bytes 256 --requests 200 --bytes 257 --interval-ms 0 --sample-every 35 --metrics-csv",
+    "cache_burst": "--mode cache --cache-bytes 514 --requests 10 --bytes 257 --pattern burst --metrics-csv",
+    "cache_ramp": "--mode cache --cache-bytes 514 --requests 10 --bytes 257 --pattern ramp --metrics-csv",
+    "cache_warm": "--mode cache --cache-bytes 257 --keys 1 --requests 20 --bytes 257 --interval-ms 0 --sample-every 7 --metrics-csv",
+    "cache_trace": "--mode cache --requests 200 --bytes 257 --trace-only",
+    "bad_cache": "--mode cache --cache-bytes -1",
+    "overflow_cache": "--mode cache --cache-bytes 4294967296",
 }
 script = ["#!/bin/sh"]
 for name, args in cases.items():
@@ -57,7 +68,10 @@ script += ["echo BEGIN_interrupted", "/proc/boot/memory_workload --requests 1000
            "echo BEGIN_pool_interrupted", "/proc/boot/memory_workload --mode pool --requests 10000 --interval-ms 10 --metrics-csv &",
            "child=$!", "sleep 1", "kill -INT $child", "wait $child", "echo EXIT=$?", "echo END_pool_interrupted",
            "echo BEGIN_unit", "/proc/boot/telemetry_test", "echo EXIT=$?", "echo END_unit",
-           "echo BEGIN_pool_unit", "/proc/boot/pool_test", "echo EXIT=$?", "echo END_pool_unit", "echo STEP1_TESTS_DONE"]
+           "echo BEGIN_pool_unit", "/proc/boot/pool_test", "echo EXIT=$?", "echo END_pool_unit",
+           "echo BEGIN_cache_interrupted", "/proc/boot/memory_workload --mode cache --requests 10000 --interval-ms 10 --metrics-csv &",
+           "child=$!", "sleep 1", "kill -INT $child", "wait $child", "echo EXIT=$?", "echo END_cache_interrupted",
+           "echo BEGIN_cache_unit", "/proc/boot/cache_test", "echo EXIT=$?", "echo END_cache_unit", "echo STEP1_TESTS_DONE"]
 (BUILD / "cases.sh").write_text("\n".join(script) + "\n", encoding="ascii", newline="\n")
 base = (VM / "output/build/ifs.build").read_text()
 assert "\n/proc/boot/hello\n" in base, "Expected Hello World startup entry"
@@ -66,6 +80,7 @@ base += (f"\n[uid=0 gid=0 perms=0755] /proc/boot/memory_workload={BUILD.as_posix
          f"[uid=0 gid=0 perms=0444] /proc/boot/cases.sh={BUILD.as_posix()}/cases.sh\n")
 base += f"[uid=0 gid=0 perms=0755] /proc/boot/telemetry_test={BUILD.as_posix()}/telemetry_test\n"
 base += f"[uid=0 gid=0 perms=0755] /proc/boot/pool_test={BUILD.as_posix()}/pool_test\n"
+base += f"[uid=0 gid=0 perms=0755] /proc/boot/cache_test={BUILD.as_posix()}/cache_test\n"
 (BUILD / "test.build").write_text(base, encoding="ascii")
 batch = ["@echo off", f'call "{SDK / "qnxsdp-env.bat"}" >nul', "@echo off",
          "if errorlevel 1 exit /b 1",
@@ -74,6 +89,8 @@ batch = ["@echo off", f'call "{SDK / "qnxsdp-env.bat"}" >nul', "@echo off",
          f'q++ -Vgcc_ntox86_64 -std=c++11 -Wall -Wextra -Werror -static "{ROOT / "tests/workload_telemetry.cpp"}" -o "{BUILD / "telemetry_test"}"',
          "if errorlevel 1 exit /b 1",
          f'q++ -Vgcc_ntox86_64 -std=c++11 -Wall -Wextra -Werror -static "{ROOT / "tests/buffer_pool.cpp"}" -o "{BUILD / "pool_test"}"',
+         "if errorlevel 1 exit /b 1",
+         f'q++ -Vgcc_ntox86_64 -std=c++11 -Wall -Wextra -Werror -static "{ROOT / "tests/bounded_cache.cpp"}" -o "{BUILD / "cache_test"}"',
          "if errorlevel 1 exit /b 1", f'cd /d "{VM}"',
          'set "MKFS_PATH=../qnx800/target/qnx/x86_64;../qnx800/target/qnx/x86_64/boot/sys;../qnx800/target/qnx;."',
          'set "PROCESSOR=x86_64"',
@@ -103,11 +120,11 @@ with log_path.open("wb") as log:
 
 output = log_path.read_text(errors="replace").replace("\r", "")
 chunks = {}
-for name in list(cases) + ["interrupted", "pool_interrupted", "unit", "pool_unit"]:
+for name in list(cases) + ["interrupted", "pool_interrupted", "unit", "pool_unit", "cache_interrupted", "cache_unit"]:
     match = re.search(rf"BEGIN_{name}\n(.*?)END_{name}", output, re.S)
     assert match, f"Missing test output: {name}"
     chunks[name] = match.group(1)
-    expected = 2 if name in {"zero", "overflow", "negative", "missing", "unknown", "pattern", "conflict", "bad_id", "bad_window", "bad_mode", "bad_pool", "large_pool"} else (130 if name.endswith("interrupted") else 0)
+    expected = 2 if name in {"zero", "overflow", "negative", "missing", "unknown", "pattern", "conflict", "bad_id", "bad_window", "bad_mode", "bad_pool", "large_pool", "bad_cache", "overflow_cache"} else (130 if name.endswith("interrupted") else 0)
     assert f"EXIT={expected}\n" in chunks[name], (name, chunks[name])
 
 def rows(name):
@@ -117,6 +134,7 @@ def rows(name):
 steady = rows("steady")
 assert len(steady) == 200 and steady == rows("repeat")
 assert steady == rows("pool_trace")
+assert steady == rows("cache_trace")
 assert [r[1] for r in steady] != [r[1] for r in rows("seed")]
 assert all(r[0] == i and 0 <= r[1] < 64 and r[2] == 257 and r[3] == i * 10000
            for i, r in enumerate(steady))
@@ -137,7 +155,7 @@ assert "completed=5 allocations=5" in chunks["paced"]
 assert rows("one") == [[0, 0, 1, 0]]
 assert "completed=1 allocations=1 result_checksum=0" in chunks["one"]
 def metrics(name):
-    lines = [line for line in chunks[name].splitlines() if line.startswith(("schema_version,", "2,"))]
+    lines = [line for line in chunks[name].splitlines() if line.startswith(("schema_version,", "3,"))]
     return list(csv.DictReader(lines))
 
 for name in ("metrics", "metrics_paced", "metrics_one", "metrics_burst", "metrics_ramp", "interrupted"):
@@ -178,7 +196,7 @@ for name in ("pool", "pool_one", "pool_burst", "pool_ramp", "pool_interrupted"):
     assert data and all(None not in r and None not in r.values() for r in data)
     summary, windows = data[-1], data[:-1]
     n, size = int(summary["completed"]), int(summary["block_bytes"])
-    assert summary["schema_version"] == "2" and summary["mode"] == "pool"
+    assert summary["schema_version"] == "3" and summary["mode"] == "pool"
     assert summary["status"] == ("interrupted" if name.endswith("interrupted") else "complete")
     assert n > 0 and (n < 10000 if name.endswith("interrupted") else n == int(summary["configured_requests"]))
     assert int(summary["allocation_calls"]) == int(summary["allocations"]) == 1
@@ -199,5 +217,50 @@ for name in ("pool", "pool_one", "pool_burst", "pool_ramp", "pool_interrupted"):
 for pooled, baseline_name in (("pool", "metrics"), ("pool_burst", "metrics_burst"), ("pool_ramp", "metrics_ramp")):
     for field in ("sequence_hash", "result_checksum"):
         assert metrics(pooled)[-1][field] == metrics(baseline_name)[-1][field], (pooled, field)
-print(f"PASS: {len(cases) + 4} QNX cases; workload/CSV, pool bounds, reuse, exhaustion, allocator failure, invalid returns, cleanup, and interruption.")
+assert "BOUNDED_CACHE_UNIT_PASS" in chunks["cache_unit"]
+for name in ("cache", "cache_pool_limited", "cache_zero", "cache_tiny", "cache_burst", "cache_ramp", "cache_warm", "cache_interrupted"):
+    data = metrics(name)
+    assert data and all(None not in r and None not in r.values() for r in data), name
+    summary = data[-1]
+    n, size = int(summary["completed"]), int(summary["block_bytes"])
+    assert n > 0 and summary["mode"] == "cache" and summary["schema_version"] == "3"
+    assert summary["status"] == ("interrupted" if name.endswith("interrupted") else "complete")
+    cap = min(int(summary["pool_blocks"]), int(summary["cache_capacity_bytes"]) // size)
+    assert int(summary["cache_effective_capacity_bytes"]) == cap * size
+    assert int(summary["cache_hits"]) + int(summary["cache_misses"]) == n
+    assert int(summary["allocations"]) == int(summary["cleanup_frees"])
+    assert int(summary["post_cleanup_owned_bytes"]) == 0
+    for r in data:
+        assert int(r["cache_bytes"]) <= cap * size
+        assert int(r["cache_bytes"]) == int(r["cache_entries"]) * size
+        assert int(r["peak_owned_buffer_bytes"]) <= int(r["pool_capacity_bytes"])
+        assert int(r["pool_exhaustions"]) == int(r["invalid_releases"]) == int(r["allocation_failures"]) == 0
+        assert int(r["completed"]) == int(r["cache_hits"]) + int(r["cache_misses"])
+        assert 0 <= float(r["latency_p50_us"]) <= float(r["latency_p99_us"]) <= float(r["latency_max_us"])
+    for field in ("completed", "allocations", "cache_hits", "cache_misses", "cache_evictions", "cache_bypasses"):
+        assert int(summary[field]) == sum(int(r[field]) for r in data[:-1]), (name, field)
+    if not name.endswith("interrupted"):
+        # Independent LRU model predicts exact hits/evictions, not just bounds.
+        model, hits, evictions = OrderedDict(), 0, 0
+        request_keys = [0] * n if name == "cache_warm" else [r[1] for r in steady[:n]]
+        for key in request_keys:
+            if key in model:
+                hits += 1
+                model.move_to_end(key)
+            elif cap:
+                if len(model) == cap:
+                    model.popitem(last=False)
+                    evictions += 1
+                model[key] = True
+        assert int(summary["cache_hits"]) == hits, name
+        assert int(summary["cache_evictions"]) == evictions, name
+        assert int(summary["cache_bypasses"]) == (n if cap == 0 else 0)
+        assert int(summary["cache_entries"]) == len(model)
+        expected = sum(sum((key + j) & 255 for j in range(size)) for key in request_keys)
+        assert int(summary["result_checksum"]) == expected
+for name, baseline_name in (("cache", "metrics"), ("cache_zero", "metrics"), ("cache_tiny", "metrics"), ("cache_burst", "metrics_burst"), ("cache_ramp", "metrics_ramp")):
+    for field in ("sequence_hash", "result_checksum"):
+        assert metrics(name)[-1][field] == metrics(baseline_name)[-1][field]
+assert metrics("cache_warm")[-1]["cache_hits"] == "19"
+print(f"PASS: {len(cases) + 6} QNX cases; baseline/pool/cache equivalence, independent LRU model, bounds, failures, cleanup, interruption, CSV.")
 print(f"QNX log: {log_path}")

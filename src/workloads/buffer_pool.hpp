@@ -11,6 +11,8 @@ struct BufferStats {
     uint64_t allocation_calls = 0, allocations = 0, frees = 0, allocation_failures = 0;
     uint64_t pool_hits = 0, pool_misses = 0, pool_exhaustions = 0, invalid_releases = 0;
     uint64_t allocated_bytes = 0, live_bytes = 0, retained_bytes = 0;
+    uint64_t cache_hits = 0, cache_misses = 0, cache_evictions = 0, cache_bypasses = 0;
+    uint64_t cache_bytes = 0, cache_entries = 0;
 };
 
 // Single-threaded, fixed-block, lazy allocation. Capacity bounds ALL owned
