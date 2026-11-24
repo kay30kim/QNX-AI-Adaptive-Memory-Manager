@@ -1,3 +1,13 @@
+# QNX Control Center
+
+Start the visual dashboard from the project root with PowerShell: `powershell -ExecutionPolicy Bypass -File .\menu.ps1`
+
+To choose between the dashboard and its compiled versions with the same layout (Ratatui and FTXUI), which are built automatically when needed, run `powershell -ExecutionPolicy Bypass -File .\menu-opciones.ps1`.
+
+Setup, guest and host memory telemetry, QEMU/VirtualBox settings, keyboard controls and building the alternative interfaces are documented in [menus/README.md](menus/README.md).
+
+## Project and plan
+
 **We are building application-level middleware and developer tools that adapt cache and buffer policies in opt-in QNX 8.0 C++ applications and measure the memory–latency tradeoff.**
 
 # QNX Adaptive Memory Manager
@@ -113,6 +123,6 @@ Each week has two 3-day sprints and one shared review/buffer day. All dates are 
 
 **Dec 12–14:** Verify public links and submit. **Official deadline: Dec 15, 11:00 a.m. PST.**
 
-Detailed plan: [Project roadmap](QNX_Adaptive_Memory_Lab_Roadmap.pdf).
+Sprint progress map: [QNX Sprint Progress Map](QNX_Sprint_Progress_Map.pdf).
 
 [Hackathon](https://qnx.devpost.com/) · [Rules](https://qnx.devpost.com/rules) · [QNX Everywhere](https://qnx.software/en/developers/get-started/qnx-everywhere)
