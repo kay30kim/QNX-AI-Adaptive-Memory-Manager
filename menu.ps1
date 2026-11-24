@@ -1,5 +1,5 @@
 param([switch]$Check, [switch]$Snapshot, [switch]$NonInteractive, [switch]$Prepare, [string]$Run, [switch]$Serve,
-    [ValidatePattern('^[a-zA-Z0-9_.= -]*$')][string]$RunArgs = '')
+    [ValidatePattern('^[a-zA-Z0-9_.= -]*$')][string]$RunArgs = '', [switch]$MetricsCsv)
 
 $ErrorActionPreference = 'Stop'
 $Root = $PSScriptRoot
@@ -8,6 +8,11 @@ $Config = @{ Vm = 'noname'; Backend = 'auto'; QemuPid = 0; QemuExecutable = ''; 
 if (Test-Path $ConfigPath) {
     $saved = Get-Content -Raw $ConfigPath | ConvertFrom-Json
     foreach ($property in $saved.PSObject.Properties) { $Config[$property.Name] = $property.Value }
+}
+# The standalone image setup keeps the SDP beside this repository.
+if (-not (Test-Path -LiteralPath $Config.SdkEnv)) {
+    $siblingSdk = Join-Path (Split-Path $Root -Parent) 'qnx800\qnxsdp-env.bat'
+    if (Test-Path -LiteralPath $siblingSdk) { $Config.SdkEnv = $siblingSdk }
 }
 $VBox = Join-Path ${env:ProgramFiles} 'Oracle\VirtualBox\VBoxManage.exe'
 # LogLevel=ERROR hides client banners (e.g. the post-quantum key exchange warning) that would pollute captured output.
@@ -222,10 +227,33 @@ function Run-Source($source, [string]$address) {
         throw 'SCP transfer failed. If QNX /tmp is full, check it with: df -h /tmp'
     }
     if ($Prepare) { Write-Output "QNX_PREPARED_PATH=$remote"; return }
+    if ($MetricsCsv) {
+        $runId = 'run-' + [guid]::NewGuid().ToString('N')
+        $recordDir = Join-Path $Root 'measurements'
+        New-Item -ItemType Directory -Force $recordDir | Out-Null
+        $csvPath = Join-Path $recordDir "workload-$runId.csv"
+        $partial = "$csvPath.partial"
+        $errorLog = Join-Path $buildDir "$runId.stderr.log"
+        $command = Get-RemoteRunCommand $remote "$RunArgs --metrics-csv --run-id $runId"
+        # Separate native streams so diagnostic output cannot contaminate CSV.
+        $sshArgs = @($SshOptions) + @('-o', 'BatchMode=yes', '-p', [string]$Config.Port, "$($Config.User)@$address", ('"' + $command + '"'))
+        $process = Start-Process -FilePath 'ssh.exe' -ArgumentList $sshArgs -NoNewWindow -Wait -PassThru -RedirectStandardOutput $partial -RedirectStandardError $errorLog
+        if (Test-Path $errorLog) { Get-Content $errorLog | ForEach-Object { Write-Host $_ } }
+        if ($process.ExitCode -ne 0) { throw "Workload/SSH failed (exit $($process.ExitCode)). Partial output: $partial" }
+        $rows = @(Import-Csv -LiteralPath $partial)
+        $summary = @($rows | Where-Object { $_.row_type -eq 'summary' })
+        if ($summary.Count -ne 1 -or $summary[0].run_id -ne $runId -or $summary[0].schema_version -ne '1' -or $summary[0].status -ne 'complete') {
+            throw "Invalid or incomplete metrics CSV: $partial"
+        }
+        Move-Item -LiteralPath $partial -Destination $csvPath
+        Write-Host "Saved workload metrics: $csvPath" -ForegroundColor Green
+        return
+    }
     Invoke-Guest $address (Get-RemoteRunCommand $remote $RunArgs) -Interactive:(-not $NonInteractive)
 }
 if ($Run) {
     if ($Prepare -and $RunArgs) { throw 'RunArgs is supported for direct -Run only, not -Prepare.' }
+    if ($MetricsCsv -and ($Prepare -or $Run.Replace('/', '\') -ne 'src\workloads\memory_workload.cpp')) { throw 'MetricsCsv requires a direct run of src\workloads\memory_workload.cpp.' }
     $info = Get-VmInfo; $address = Get-GuestAddress $info
     $srcRoot = [IO.Path]::GetFullPath((Join-Path $Root 'src')).TrimEnd('\') + '\'
     $sourcePath = [IO.Path]::GetFullPath((Join-Path $Root $Run))

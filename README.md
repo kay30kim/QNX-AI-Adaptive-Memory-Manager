@@ -110,8 +110,8 @@ cat /tmp/requests.csv
 
 That file is inside the guest. The standalone VM uses `-snapshot`, so guest
 files do not persist after QEMU exits. Trace printing affects execution time;
-use runs without `--trace` for comparisons. Detailed memory/p99/throughput CSV
-instrumentation belongs to Step 2.
+use runs without `--trace` for comparisons. Runtime statistics and the separate
+metrics CSV are described in Step 2 below.
 
 If a running SSH-enabled VM is already configured in `qnx.local.json`, this
 alternative **Windows CMD** command builds, uploads, and runs the workload:
@@ -125,9 +125,96 @@ paths, or redirection; it is supported for direct `-Run`, not `-Prepare`.
 
 For automated verification, run `python scripts\test-memory-workload.py` with
 Python 3.10+ on Windows. It compiles with warnings as errors, boots a temporary
-QNX test image in headless QEMU, and checks 16 cases covering deterministic
-replay, changed seeds, all three schedules, baseline results, and invalid
-arguments. Build products and the guest log are under `.build/workload-tests/`.
+QNX test image in headless QEMU, and checks 26 cases covering deterministic
+replay, schedules, baseline results, telemetry CSV, reference percentiles,
+interruption, and invalid arguments. Build products and the guest log are under
+`.build/workload-tests/`.
+
+## Sprint 3, Step 2: runtime telemetry and host CSV
+
+Prerequisite: QNX is running, `qnx.local.json` contains its SSH host/user/port,
+and SSH key authentication works without a password prompt. Keep the existing
+VM open. This command builds and uploads the current workload, runs it, and
+saves a unique CSV directly to the Windows `measurements/` directory:
+
+```powershell
+cd "C:\Users\chaeh\Desktop\Kay\QNX-AI-Adaptive-Memory-Manager"
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\measure-workload.ps1
+```
+
+The same `powershell ...` command works from CMD after changing to the project
+directory with `cd /d`. To choose another workload or sample grouping:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\measure-workload.ps1 -Pattern burst -Requests 1000 -Seed 42 -SampleEvery 100
+```
+
+Other parameters are `-Keys`, `-Bytes`, and `-IntervalMs`. The script prints
+`Saved workload metrics: <absolute path>` only after successful execution and
+CSV validation. Interrupted/failed runs retain `.csv.partial` output rather
+than being presented as successful results. SSH/runtime diagnostics are saved
+under `.build/<run-id>.stderr.log`. If the configured SDP script is missing,
+the runner checks the sibling `qnx800/qnxsdp-env.bat` installation.
+
+Dashboard program 7 also prints a human-readable p99/throughput/buffer summary
+after completion. Its `G` key continues to record the separate system-memory
+CSV; it does not activate the new workload CSV. For direct execution in QNX:
+
+```sh
+/proc/boot/memory_workload --metrics-csv
+```
+
+`--metrics-csv` prints only the telemetry CSV to stdout; diagnostic summaries
+go to stderr. `--trace` and `--trace-only` cannot be combined with it.
+`--run-id` accepts 1-64 ASCII letters, digits, underscores, or hyphens. The host
+runner assigns a UUID-based ID automatically. Direct QNX runs default to an ID
+made from the guest wall-clock nanoseconds and PID; a caller can supply an ID
+when coordinating records across VM restarts.
+
+### CSV schema version 1 and measurement definitions
+
+Each file contains `window` rows (100 attempted requests each by default, with
+a possibly shorter final window) and one `summary` row. Rows are emitted after
+execution, so CSV serialization and SSH transfer are outside measured time.
+Windows are request-count groups, not fixed time intervals; they become
+available at the end of the run rather than streaming live.
+
+| Fields | Meaning |
+| --- | --- |
+| `schema_version`, `run_id`, `row_type`, `status` | Version, run identity, window/summary, and complete/interrupted/allocation_failed |
+| `mode`, `pattern`, `seed`, `configured_requests`, `keys`, `block_bytes`, `interval_ms`, `sample_every` | Reproduction settings; mode is currently baseline |
+| `window_index`, `start_ns`, `end_ns` | Zero-based window index (summary uses 0), monotonic offsets from run start in nanoseconds |
+| `attempted`, `completed`, `allocation_calls`, `allocations`, `frees`, `allocation_failures` | Counts within this row; summary counts cover the whole run |
+| `allocated_bytes` | Sum of successfully requested payload bytes; cumulative allocation volume, not resident RAM |
+| `live_buffer_bytes`, `peak_live_buffer_bytes`, `retained_buffer_bytes` | Payload bytes still in use at row boundary, maximum simultaneous live payload in this row, and idle payload retained for reuse |
+| `measurement_storage_bytes` | Reserved sample-vector backing storage; excludes statistics scratch vectors, allocator overhead, and other runtime memory |
+| `elapsed_seconds`, `throughput_rps` | Observed duration including pacing and in-loop measurement overhead; completed / duration |
+| `latency_p50_us`, `latency_p95_us`, `latency_p99_us`, `latency_max_us` | Successful request allocate/fill/read/free service times in microseconds; excludes pacing and request generation |
+| `start_lateness_p99_us` | Successful request start minus scheduled start, clamped at zero; separate from service latency |
+| `cache_hits`, `cache_misses` | Empty: no cache exists yet; do not interpret as measured zero |
+| `sequence_hash`, `result_checksum` | Present on the summary only; allow input/result comparison across repeated runs |
+
+Percentiles use nearest rank: sorted observation at `ceil(p * N)`, counting
+from 1. Summary p99 is computed from all successful requests, never averaged
+from window p99 values. When no requests succeed, latency fields are empty.
+Window durations span the previous window's last completion to the current
+window's last completion; the first starts at zero. Overall duration additionally
+includes the final loop bookkeeping, so it can slightly exceed summed windows.
+
+The baseline owns one payload buffer at a time. At completion its live and
+retained payload bytes are zero, while peak live payload equals `block_bytes`.
+These are application-owned counters, **not process RSS, libc heap size, or
+QNX total RAM**. Use the dashboard guest/host metrics for those separate views.
+Allocation counts exclude measurement and standard-library allocations.
+
+All non-trace-only runs collect timing samples, including the default human
+summary mode. Storage grows with configured requests (currently one Sample
+struct per request), and sorting uses additional scratch memory after the run.
+Measurement overhead is therefore part of the instrumented baseline; this is
+not a zero-overhead profiler. `--trace` additionally includes stdout tracing in
+overall elapsed time, so do not compare its throughput against non-traced runs.
+SIGINT/SIGTERM stop after the current request and output partial statistics with
+exit code 130; a hard kill or lost transport may prevent any CSV from arriving.
 
 ## Project and plan
 
