@@ -467,6 +467,96 @@ processes its saved recordings on the host.
 
 Host tests: `python -m unittest discover -s tests -p test_workload_data.py -v`.
 
+## Sprint 3, Step 6: offline features, training, and held-out evaluation
+
+Run the whole pipeline in **Windows PowerShell**, from this repository:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\train-workload.ps1
+```
+
+This reads `measurements/workload-*.csv`, validates every input with Step 5,
+extracts features, trains a small ridge regression model, and evaluates it on
+held-out workload groups. It uses only Python's standard library and the same
+interpreter selection as `workload-data.ps1` (`-PythonExe`, `QNX_PYTHON`, local
+`.build/python-runtime.txt`, or installed Python). QNX and SSH are not required.
+`menu.ps1` still builds/runs workloads and collects recordings; training runs
+separately on the host and does not apply memory policies.
+
+Each invocation creates a new `measurements/ai/train-<id>/` directory. The
+printed `output_dir` identifies it. Outputs are:
+
+| File | Contents |
+|---|---|
+| `manifest.json` | Source paths and SHA-256 hashes, run/group IDs, schema, split, usable and skipped pair counts |
+| `features.jsonl` | Current-window features, next-window labels, timestamps, run IDs and train/test membership |
+| `model.json` | Versioned feature schema, training-only preprocessing, coefficients and training provenance |
+| `report.json` | Held-out MAE/RMSE, per-run results, macro run MAE, baseline comparisons and limitations |
+| `predictions.jsonl` | Held-out predictions alongside actual labels and persistence predictions |
+
+The two targets are the **next full measurement window's peak owned payload
+bytes** and **service p99 latency in microseconds**. Payload means application
+buffers/cache, not QNX RAM or process RSS. Schema 1 baseline recordings use
+peak live payload as peak owned payload; schemas 2/3 have the explicit counter.
+The horizon is `sample_every` requests, not a fixed number of seconds. Short
+final windows are excluded from training/evaluation pairs. A run with fewer
+than two full windows contributes no labeled examples and is listed in the
+manifest. Only complete validated runs are accepted.
+
+Features use only the current completed window: mode, known workload settings,
+throughput, p99/lateness, payload counters, allocation rate, capacity and hit
+ratios. Summaries, future measurements, run IDs, seeds and checksums are not
+model inputs. Missing metrics remain `null` in exported features. The model
+uses training-only mean imputation/standardization and explicit missing-value
+indicators; all-missing training features use mean 0 and scale 1. Prediction
+outputs are clipped to nonnegative values.
+
+Splitting happens **by entire workload group**, never by window. A group is
+`(pattern, seed, keys, block_bytes, interval_ms)`: repeated runs and baseline,
+pool or cache variants stay together, including runs with different lengths
+or sampling intervals. At least two groups with usable pairs are required.
+Groups are ordered by a seeded SHA-256 rank; by default 25% (rounded up, with
+at least one group left for training) are held out. No parameters are selected
+using test results. Keep the split fixed when comparing changes; use fresh
+independent runs for a final evaluation after tuning.
+
+The report compares ridge predictions against **persistence** (the current
+window's value) and the **training target mean**, with errors in original
+bytes/microseconds. Lower is better; equal errors are not counted as a win.
+The fit and overall scores weight each example equally; macro run MAE weights
+each test run equally. Few examples, constant training targets and modes or
+patterns absent from training are explicitly reported. This is an offline
+pipeline foundation, not evidence of memory savings or a deployed AI policy.
+The current six local recordings provide only 30 usable pairs (3 training,
+27 held out under the default split); the memory target is constant and the
+latency model performs worse than persistence. Collect more seeds, burst/ramp
+patterns, block sizes and cache budgets before assessing generalization.
+
+Choose an explicit, **new** output directory for a reproducible invocation:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\train-workload.ps1 -OutputDir .\measurements\ai\experiment-01 -Seed 42 -Alpha 1
+```
+
+Load its saved model to forecast after the last full window of each recording:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\train-workload.ps1 -Action Predict -ModelPath .\measurements\ai\experiment-01\model.json
+```
+
+Prediction emits estimates, not accuracy scores. `-Action Evaluate` scores a
+saved model against labeled recordings supplied with `-InputPath <file-or-dir>`.
+It rejects training run IDs **and** training workload groups, including renamed
+runs with the same request conditions. To evaluate genuinely new data, supply
+a separate directory of fresh runs with unseen groups. Existing output
+directories are never overwritten. Interrupting output writing may leave an
+incomplete output directory; rerun to a new directory.
+
+Host tests: `python -m unittest discover -s tests -p "test_workload*.py" -v`.
+Tests cover label timing, group separation, training-only preprocessing,
+missing values, a closed-form ridge reference, model reload, baseline errors,
+and CLI output/failure handling. No new QNX runtime code is introduced here.
+
 ## Core MVP
 
 - **Memory profiling:** Collect system/process memory usage and application counters on QNX.
