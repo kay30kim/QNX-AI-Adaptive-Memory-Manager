@@ -527,9 +527,9 @@ The fit and overall scores weight each example equally; macro run MAE weights
 each test run equally. Few examples, constant training targets and modes or
 patterns absent from training are explicitly reported. This is an offline
 pipeline foundation, not evidence of memory savings or a deployed AI policy.
-The current six local recordings provide only 30 usable pairs (3 training,
+The initial Step 6 smoke test's six local recordings provided only 30 usable pairs (3 training,
 27 held out under the default split); the memory target is constant and the
-latency model performs worse than persistence. Collect more seeds, burst/ramp
+latency model performed worse than persistence. Collect more seeds, burst/ramp
 patterns, block sizes and cache budgets before assessing generalization.
 
 Choose an explicit, **new** output directory for a reproducible invocation:
@@ -556,6 +556,114 @@ Host tests: `python -m unittest discover -s tests -p "test_workload*.py" -v`.
 Tests cover label timing, group separation, training-only preprocessing,
 missing values, a closed-form ridge reference, model reload, baseline errors,
 and CLI output/failure handling. No new QNX runtime code is introduced here.
+
+## Sprint 3, Step 7: repeated experiments and comparison reports
+
+With the QNX VM running and passwordless SSH configured in `qnx.local.json`,
+run this in **Windows PowerShell** from the repository directory:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\benchmark-workload.ps1
+```
+
+This uses the existing `measure-workload.ps1` → `menu.ps1` build/upload/run path.
+It records **baseline, pool and cache** on matched workloads, validates every
+CSV, checks request-sequence hashes and result checksums, and generates a
+self-contained HTML report with charts. This completes the seven-step Sprint 3
+runtime/data foundation; threshold rules, adaptive control and live AI policy
+application remain later-sprint work.
+
+Defaults are steady/burst/ramp × seeds 42/43/44 × three measured repeats ×
+three modes = **81 measurements**, plus **27 excluded warmup runs**. Each run
+uses 200 requests, 64 keys, 4,096-byte payloads, a 1 ms base interval, 20-request
+windows, eight pool blocks and a 32,768-byte cache budget. Mode order rotates
+between repeats/scenarios. Every invocation starts a fresh process: warmups
+exercise the host/guest environment, not a cache that survives into measured
+runs. Build/upload overhead is outside workload metrics, but makes the batch
+take considerably longer than its request pacing alone.
+
+Inspect the full plan without SSH, compilation or output files:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\benchmark-workload.ps1 -Plan
+```
+
+For a smaller repeated experiment (12 measured runs plus six warmups):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\benchmark-workload.ps1 -Patterns steady -Seeds '142,143' -Repeats 2 -Requests 100 -SampleEvery 10
+```
+
+Parameters include `-Patterns 'steady,burst,ramp'`, `-Seeds '142,143,144'`,
+`-Repeats`, `-Warmups`, `-Requests`, `-Keys`, `-Bytes`, `-IntervalMs`,
+`-SampleEvery`, `-PoolBlocks`, `-CacheBytes`, `-TimeoutSeconds`, `-SkipAI` and
+`-OutputDir`. Python 3.9+ is required, with the same `-PythonExe`/`QNX_PYTHON`
+selection as Step 6. An explicit output directory must not already exist.
+Run one benchmark at a time and avoid simultaneous dashboard program builds;
+`menu.ps1` shares a build directory. Keep CPU load/monitoring conditions
+consistent when comparing measurements. The dashboard's guest probe itself
+adds activity, so use the same probe setting throughout the experiment.
+
+Results go into a new `measurements/benchmarks/batch-<id>/` directory:
+
+| Output | Purpose |
+|---|---|
+| `experiment.json` | Exact plan/settings, run status/order, timestamps, target config, source hashes, Git state, errors and AI status |
+| `raw/` | Copies of measured CSVs only, ready for Step 5/6 tools |
+| `warmups/` | Warmup CSVs, excluded from reports and AI training |
+| `logs/` | Per-run build/upload/SSH logs, including failed jobs |
+| `report.html` | Offline charts and tables; open in a browser |
+| `report.json`, `report.csv` | Machine-readable per-scenario/mode statistics and paired changes |
+| `ai/` | Step 6 features, model, held-out predictions and evaluation using only this batch's measured runs |
+
+The original files created by `menu.ps1` remain in the top-level `measurements/`
+directory, including warmups. For later controlled analysis/training, pass this
+batch's `raw/` directory with `-InputPath` rather than selecting all top-level
+recordings. Copies retain their run IDs; do not combine originals and copies
+in one validation/training input set.
+
+The HTML charts show mean and min/max for allocations, peak owned payload,
+per-run p99 latency and throughput. Tables add sample standard deviation,
+failure/cleanup counters, cache hit ratio and paired percent changes against
+the baseline from the same seed/repeat. Positive change means an increase;
+that is worse for allocations/memory/latency and better for throughput.
+Zero denominators yield missing changes, not infinity. Missing cache counters
+remain missing. The report summarizes **per-run p99 values**; it does not
+average window p99s or claim a pooled request-level percentile. Payload bytes
+are not RSS/VM RAM, and there is no assumed improvement or significance claim.
+Throughput includes configured pacing; service latency excludes scheduled waits.
+
+AI fitting runs after successful measurements, using the Step 6 whole-group
+split. If fewer than two groups have adjacent full windows, AI is explicitly
+skipped. AI failure returns nonzero while preserving runtime results. The
+report links to the separate AI evaluation: this is **baseline/pool/cache**
+runtime benchmarking, not a static/rules/AI controller comparison.
+
+The batch fails fast on build/SSH/validation errors or fingerprint mismatch.
+It preserves completed recordings and failed-job logs; pending jobs remain
+listed. Only fully matched triples enter statistics, so partial results cannot
+look like complete comparisons. Ctrl+C stops the active local child process
+tree and records interruption; forced terminal closure may leave a `running`
+manifest. The per-job timeout includes building and uploading (180 seconds by
+default); increase it for deliberately long workloads. Restart in a new output
+directory after fixing the failure. No existing recordings are overwritten.
+
+To regenerate reports without QNX, use the exact output directory printed by
+your run (this example assumes you chose `-OutputDir .\measurements\benchmarks\my-run`):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\benchmark-workload.ps1 -ReportOnly .\measurements\benchmarks\my-run
+```
+
+Report-only revalidates saved CSV hashes and comparisons before replacing the
+derived reports. It does not rerun workloads or retrain AI. A failed/incomplete
+experiment still returns a nonzero exit code. Automated host tests cover plan
+rotation, matched workload/result checks, warmup exclusion, paired statistics,
+missing values, interrupted/failed batches, integrity checks and AI handoff:
+
+```powershell
+python -m unittest discover -s tests -p "test_workload*.py" -v
+```
 
 ## Core MVP
 

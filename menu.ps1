@@ -247,6 +247,7 @@ function Run-Source($source, [string]$address) {
         }
         Move-Item -LiteralPath $partial -Destination $csvPath
         Write-Host "Saved workload metrics: $csvPath" -ForegroundColor Green
+        Write-Output "QNX_METRICS_PATH=$csvPath"
         return
     }
     Invoke-Guest $address (Get-RemoteRunCommand $remote $RunArgs) -Interactive:(-not $NonInteractive)
