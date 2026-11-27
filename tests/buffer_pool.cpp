@@ -67,5 +67,20 @@ int main() {
         assert(pool.stats().allocation_calls == 2 && pool.stats().allocations == 1);
     }
     assert(outstanding.empty());
+    {
+        runtime::BufferPool pool(32, 3, allocate, deallocate);
+        auto* live = pool.acquire();
+        auto* idle = pool.acquire();
+        live[0] = 91;
+        assert(pool.release(idle));
+        assert(pool.trim_idle() == 32 && outstanding.size() == 1);
+        assert(live[0] == 91 && pool.stats().live_bytes == 32);
+        assert(pool.stats().retained_bytes == 0 && pool.stats().frees == 1);
+        assert(pool.trim_idle() == 0 && pool.capacity_bytes() == 96);
+        assert(pool.acquire()); // freed slots can allocate again
+        assert(pool.release(live));
+        assert(pool.trim_idle() == 32);
+    }
+    assert(outstanding.empty());
     std::puts("BUFFER_POOL_UNIT_PASS");
 }

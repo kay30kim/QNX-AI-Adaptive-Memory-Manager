@@ -85,6 +85,23 @@ public:
         return false;
     }
 
+    // Release idle payloads only; checked-out pointers remain valid. The
+    // configured block limit and metadata are unchanged. Returns freed bytes.
+    size_t trim_idle() noexcept {
+        size_t freed = 0;
+        for (size_t i = 0; i < blocks_; ++i) {
+            auto& slot = slots_[i];
+            if (slot.data && !slot.used) {
+                deallocate_(slot.data);
+                slot.data = nullptr;
+                ++stats_.frees;
+                stats_.retained_bytes -= block_bytes_;
+                freed += block_bytes_;
+            }
+        }
+        return freed;
+    }
+
     // Only call after all clients stop using their pointers. Idempotent;
     // destructor also releases outstanding blocks to avoid leaking on errors.
     void clear() noexcept {

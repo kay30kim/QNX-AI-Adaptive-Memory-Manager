@@ -56,6 +56,44 @@ public:
     size_t effective_capacity_bytes() const { return entry_limit_ * block_bytes_; }
     size_t metadata_bytes() const { return entries_ ? entry_limit_ * sizeof(Entry) : 0; }
     size_t pool_metadata_bytes() const { return pool_.metadata_bytes(); }
+    // Call between requests on the owning thread (never from Compute).
+    // Round down to whole blocks and cap at the original pool capacity.
+    // Allocate replacement metadata before changing anything: failure leaves
+    // the existing capacity, entries, LRU order and counters untouched.
+    bool set_capacity(size_t cache_bytes) {
+        if (!valid()) return false;
+        const size_t limit = std::min(pool_.capacity_bytes() / block_bytes_, cache_bytes / block_bytes_);
+        if (limit > SIZE_MAX / sizeof(Entry)) return false;
+        if (limit == entry_limit_) { pool_.trim_idle(); return true; }
+        std::unique_ptr<Entry[]> replacement;
+        if (limit) {
+            replacement.reset(new (std::nothrow) Entry[limit]);
+            if (!replacement) return false;
+        }
+        // Keep the most recently used entries, compacting their slot indices.
+        const size_t keep = std::min(limit, static_cast<size_t>(cache_.cache_entries));
+        size_t old = head_;
+        for (size_t i = 0; i < keep; ++i) {
+            replacement[i] = entries_[old];
+            old = entries_[old].next;
+            replacement[i].previous = i ? i - 1 : none;
+            replacement[i].next = i + 1 < keep ? i + 1 : none;
+        }
+        while (cache_.cache_entries > keep) {
+            const size_t index = tail_;
+            pool_.release(entries_[index].block);
+            unlink(index);
+            --cache_.cache_entries;
+            cache_.cache_bytes -= block_bytes_;
+            ++cache_.cache_evictions;
+        }
+        entries_.swap(replacement);
+        entry_limit_ = limit;
+        head_ = keep ? 0 : none;
+        tail_ = keep ? keep - 1 : none;
+        pool_.trim_idle();
+        return true;
+    }
     uint64_t request_peak_live() const { return peak_live_; }
     uint64_t request_peak_owned() const { return peak_owned_; }
     BufferStats stats() const {

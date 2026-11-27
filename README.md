@@ -665,6 +665,51 @@ missing values, interrupted/failed batches, integrity checks and AI handoff:
 python -m unittest discover -s tests -p "test_workload*.py" -v
 ```
 
+## Step 8: change cache capacity between requests
+
+`runtime::BoundedCache::set_capacity(bytes)` changes the payload budget on an
+existing cache. Call it on the owning thread between `get_or_compute()` calls,
+never concurrently or from the compute callback. This is a C++ runtime API;
+the workload CLI still uses a fixed capacity. Automatic policies and live
+telemetry are later steps.
+
+```cpp
+runtime::BoundedCache cache(4096, 8, 32768);
+if (!cache.valid()) { /* handle initialization failure */ }
+// Process requests, then shrink to two blocks without restarting:
+if (!cache.set_capacity(8192)) { /* keep the previous policy */ }
+// Later grow again; payload blocks are allocated lazily on cache misses:
+if (!cache.set_capacity(32768)) { /* keep the previous policy */ }
+```
+
+Capacity rounds down to whole blocks and is capped by the constructor's pool
+block limit. Read `effective_capacity_bytes()` to obtain the applied limit.
+Shrinking keeps the most recently used results and evicts from the LRU tail.
+It also calls `BufferPool::trim_idle()`, which actually invokes the configured
+deallocator for idle payloads without touching checked-out blocks. Even a
+same-capacity call trims idle buffers. Growing preserves existing results and
+LRU order and does not preallocate payloads.
+
+Replacement cache metadata is allocated before mutation. Invalid caches,
+metadata-size overflow or metadata allocation failure return false without
+changing the prior state. Cache metadata is resized; the pool's original
+metadata and maximum block count remain fixed. Resize evictions and frees
+contribute to the existing cumulative counters. Request peak counters describe
+the last request, not the resize operation.
+
+Zero (or less than one block) evicts all results and frees all owned payloads
+at the resize boundary. Subsequent requests retain the existing bypass
+behavior: compute through one reusable scratch buffer, which can remain idle
+until another capacity call or cleanup. Zero cache capacity therefore does not
+mean zero application memory. Deallocation reduces application-owned payload,
+but does not guarantee that libc immediately returns memory to QNX or lowers RSS.
+
+The QNX test suite exercises shrink/grow/zero/regrow, preserved results and LRU
+order, actual deallocator calls, pool caps, allocation failure after growth,
+cleanup and 500 requests checked against an independent LRU reference while
+resizing. Run `python scripts/test-memory-workload.py` to build with warnings
+as errors and execute these tests plus existing workload checks in headless QEMU.
+
 ## Core MVP
 
 - **Memory profiling:** Collect system/process memory usage and application counters on QNX.
