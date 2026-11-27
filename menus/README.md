@@ -57,6 +57,13 @@ The file has only these columns:
 
 ## Dashboard keys
 
+The bottom-left footer spells out each action. Type its letter and press Enter;
+these are keyboard commands, not clickable buttons. M, P and G descriptions
+change with the panel, sampling and recording state to show what pressing them
+will do next. Short windows omit the decorative logo and paginate programs to
+keep the help and input prompt visible. Minimum terminal size is 70 columns
+by 28 rows; the middle metrics/chart panel needs 100 columns.
+
 | Key | Action |
 | --- | --- |
 | number + Enter | Compile the program, upload it and run it in QNX. Use **Tab** to type input for an interactive program. |
@@ -65,6 +72,7 @@ The file has only these columns:
 | `H` | Show host details and run `pidin info; pidin mem` in the output pane |
 | `P` | Turn the guest probe on or off |
 | `G` | Start or stop CSV recording |
+| `A` | Show the latest saved benchmark and offline AI evaluation in the output pane; use PgUp/PgDn to scroll. Press again to reload. |
 | `S` | Run a single SSH command |
 | `I` | Start the VM (VirtualBox, or QEMU with `QemuExecutable`) |
 | `C` | Set host, user, port and VM |
@@ -73,6 +81,40 @@ The file has only these columns:
 | `Q` | Quit |
 
 Up/Down, PgUp/PgDn and End scroll the output pane.
+
+### AI/cache results (`A` + Enter)
+
+Restart `menu.ps1` after updating, then type `A` and Enter. The middle column
+shows colored horizontal bars for memory and latency prediction MAE: AI (cyan),
+Last/persistence (yellow), and Mean/training mean (green). Lower is better.
+Each chart has its own linear scale from zero to its maximum value; units are
+bytes and microseconds respectively. Exact values appear beside the bars.
+An asterisk means a positive value too small to fill one cell; missing values
+show N/A, not zero. Press `M` and Enter to return to guest/host metrics, or `A`
+again to refresh saved results. Widen the terminal to at least 100 columns to
+show the middle panel. The output pane shows saved baseline,
+pool and cache results by pattern/seed: peak owned payload, p99, throughput,
+hit ratio and failures. The AI section compares held-out MAE for ridge,
+persistence and training-mean predictions (lower is better).
+
+This reads the newest benchmark manifest under `measurements/benchmarks`
+each time you press A. The batch path, saved UTC time and completion status
+are displayed. Incomplete batches and missing/corrupt files are reported;
+they are not silently replaced with older successful results. These are saved
+measurements, not live AI control or proof of memory savings. The resize API
+is available, but AI policy application remains unconnected.
+
+Without opening the dashboard or running QNX:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\show-ai-status.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\show-ai-chart.ps1
+```
+
+Use `-BatchPath <directory>` to inspect a particular saved benchmark. Generate
+new recordings with `scripts/benchmark-workload.ps1` when QNX/SSH is ready.
+The underlying `report.html` path is printed for full charts. This feature
+does not launch benchmarks automatically.
 
 ## Configuration (`qnx.local.json`, git-ignored)
 

@@ -710,6 +710,21 @@ cleanup and 500 requests checked against an independent LRU reference while
 resizing. Run `python scripts/test-memory-workload.py` to build with warnings
 as errors and execute these tests plus existing workload checks in headless QEMU.
 
+On Windows, use the PowerShell launcher if `python` resolves to a Windows
+Store alias (for example, it prints only `Python` and exits):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-memory-workload.ps1
+```
+
+The launcher uses `-PythonExe`, `QNX_PYTHON`, a valid local
+`.build/python-runtime.txt`, or a non-Store Python on PATH, in that order. It
+checks Python 3.10+ before building/running tests and propagates failures.
+A successful run ends with `PASS: 48 QNX cases` and the guest log path.
+
+To inspect saved runtime comparisons and AI prediction errors in the dashboard,
+press **A + Enter**. See [AI/cache results](menus/README.md#ai-cache-results-a--enter).
+
 ## Core MVP
 
 - **Memory profiling:** Collect system/process memory usage and application counters on QNX.

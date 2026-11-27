@@ -35,6 +35,7 @@ $script:treeCursor = 0
 $script:treeExpanded = @{}
 $script:treeExpanded[(Join-Path $Root 'src')] = $true
 $script:memoryOpen = $true
+$script:aiChart = $null
 $script:memoryHistory = New-Object 'System.Collections.Generic.List[double]'
 $script:baselineUsed = $null
 $script:peakUsed = $null
@@ -346,6 +347,12 @@ function Start-Action([string]$choice) {
         return
     }
     switch ($choice.ToUpperInvariant()) {
+        'A' {
+            Start-LogSection
+            foreach ($line in (& (Join-Path $Root 'scripts/show-ai-status.ps1'))) { Add-Log $line }
+            $script:aiChart = @(& (Join-Path $Root 'scripts/show-ai-chart.ps1'))
+            $script:memoryOpen = $true
+        }
         'Q' { $script:quitting = $true }
         'K' { Stop-Task }
         'I' {
@@ -367,6 +374,7 @@ function Start-Action([string]$choice) {
         }
         'M' {
             if ($script:serve) { return }   # the front end owns its layout
+            if ($null -ne $script:aiChart) { $script:aiChart = $null; return }
             $script:memoryOpen = -not $script:memoryOpen; $script:cache = @{}; [Console]::Clear()
             if ($script:memoryOpen -and [Console]::WindowWidth -lt 100) { Add-Log '[widen terminal to 100 columns to show metrics panel]' }
         }
@@ -478,10 +486,30 @@ function Invoke-TreeKey([string]$key) {
         'left' { if ($entry -and $entry.Directory) { $script:treeExpanded[$entry.Path] = $false; Refresh-Tree } }
     }
 }
+function Get-KeyHelp {
+    ' KEYS: type a key, then Enter'
+    ' A  Saved AI charts (not live)'
+    if ($null -ne $script:aiChart) { ' M  Return to live memory panel' }
+    elseif ($script:memoryOpen) { ' M  Hide memory panel' }
+    else { ' M  Show memory panel (100+ cols)' }
+    ' C  Edit SSH/VM settings'
+    if ($Config.GuestProbe) { ' P  Turn QNX sampling OFF' }
+    else { ' P  Turn QNX sampling ON' }
+    if ($script:recording) { ' G  Stop recording memory CSV' }
+    else { ' G  Start recording memory CSV' }
+    ' T  Browse source files as a tree'
+    ' I  Start configured VM'
+    ' H  Show host/QNX memory details'
+    ' S  Enter and run an SSH command'
+    ' V  Show VM diagnostics'
+    ' K  Stop task    Q  Quit dashboard'
+    ' PgUp/PgDn: logs | Tab: app input'
+}
+
 function Render {
     $width = [Console]::WindowWidth; $height = [Console]::WindowHeight
-    if ($width -lt 70 -or $height -lt 20) {
-        [Console]::SetCursorPosition(0, 0); [Console]::Write('Expand terminal to at least 70 columns x 20 rows. Press Q then Enter to quit.'.PadRight([math]::Max(1, $width - 1)).Substring(0, [math]::Max(1, $width - 1)))
+    if ($width -lt 70 -or $height -lt 28) {
+        [Console]::SetCursorPosition(0, 0); [Console]::Write('Expand terminal: 70+ columns, 28+ rows. Q + Enter quits.'.PadRight([math]::Max(1, $width - 1)).Substring(0, [math]::Max(1, $width - 1)))
         $script:cache = @{}; return
     }
     $showMemory = $script:memoryOpen -and $width -ge 100
@@ -494,7 +522,10 @@ function Render {
     $left = New-Object 'System.Collections.Generic.List[string]'
     $g = $script:guest
     $memoryColor = if ($g -and $g.UsedPercent -ge 90) { [ConsoleColor]::Red } elseif ($g -and $g.UsedPercent -ge 75) { [ConsoleColor]::Yellow } else { [ConsoleColor]::Cyan }
-    foreach ($item in @('    ___  _   _ __  __','   / _ \| \ | |\ \/ /','  | | | |  \| | \  /','  | |_| | |\  | /  \','   \__\_\_| \_|/_/\_\','  CONTROL CENTER',"  TARGET  $($Config.Vm)  |  $state","  ADDRESS $guest",'  ----------------------------------------')) { $left.Add($item) }
+    if ($height -ge 38) {
+        foreach ($item in @('    ___  _   _ __  __','   / _ \| \ | |\ \/ /','  | | | |  \| | \  /','  | |_| | |\  | /  \','   \__\_\_| \_|/_/\_\')) { $left.Add($item) }
+    }
+    foreach ($item in @('  CONTROL CENTER',"  TARGET  $($Config.Vm)  |  $state","  ADDRESS $guest",'  ----------------------------------------')) { $left.Add($item) }
     if ($g) { $left.Add(('  QNX RAM  {0:N0}/{1:N0} MiB  {2:N0}%' -f ($g.UsedBytes / 1MB), ($g.TotalBytes / 1MB), $g.UsedPercent)) }
     elseif (-not (Test-GuestProbeEnabled)) { $left.Add('  QNX RAM  probe off (P)') }
     else { $left.Add('  QNX RAM  waiting for pidin...') }
@@ -503,7 +534,9 @@ function Render {
     $left.Add(('  Backend: {0}{1}' -f $script:info.Backend, $cpuText))
     $left.Add('  ----------------------------------------')
     if ($script:treeMode) { $left.Add('  SRC TREE  Up/Down Enter Esc') } elseif ($script:task) { $left.Add('  PROGRAMS  [BUSY] K/Ctrl+C: stop') } else { $left.Add('  PROGRAMS  [READY] (number + Enter)') }
-    $pageSize = [math]::Max(1, $height - 22)
+    $keyHelp = @(Get-KeyHelp)
+    # Reserve footer, page navigation, prompt and the final console row.
+    $pageSize = [math]::Max(1, $height - $left.Count - $keyHelp.Count - 3)
     $maxPage = [math]::Max(0, [math]::Ceiling($script:sources.Count / $pageSize) - 1)
     $script:maxPage = $maxPage
     $script:page = [math]::Min($script:page, $maxPage)
@@ -521,16 +554,17 @@ function Render {
             $left.Add(('  {0}. {1}' -f ($i + 1), $relative))
         }
     }
-    while ($left.Count -lt $height - 7) { $left.Add('') }
+    while ($left.Count -lt $height - $keyHelp.Count - 3) { $left.Add('') }
     if ($script:treeMode) { $left.Add('  Up/Down move  Enter open  Esc back') } else { $left.Add("  Page $($script:page + 1)/$($maxPage + 1)  <-/-> programs") }
-    $left.Add($(if ($script:recording) { ' T Tree M Panel H pidin G REC S SSH' } else { ' T Tree M Panel H pidin G CSV S SSH' }))
-    if ($script:treeMode) { $left.Add('  Enter: open/run .cpp   Esc: back') } else { $left.Add(' I VM C Cfg P Probe V Tools Q Quit') }
+    foreach ($helpLine in $keyHelp) { $left.Add($helpLine) }
     $prompt = Get-PromptText
     $availableInput = [math]::Max(1, $leftWidth - $prompt.Length)
     $visibleInput = if ($script:inputText.Length -gt $availableInput) { $script:inputText.Substring($script:inputText.Length - $availableInput) } else { $script:inputText }
     $left.Add($prompt + $visibleInput)
     $middle = New-Object 'System.Collections.Generic.List[string]'
-    if ($showMemory) {
+    if ($showMemory -and $null -ne $script:aiChart) {
+        foreach ($chartLine in $script:aiChart) { $middle.Add($chartLine) }
+    } elseif ($showMemory) {
         # Guest view: what QNX itself reports (pidin/top over SSH).
         $addCommand = { param([string]$command) foreach ($commandLine in (Split-CommandLine $command ($middleWidth - 3))) { $middle.Add($commandLine) } }
         $middle.Add(' QNX GUEST  pidin/top via SSH')
@@ -574,6 +608,10 @@ function Render {
             & $addCommand (Get-HostMetricCommand $script:info)
         } else { $middle.Add(' Unavailable') }
         $middle.Add($(if ($script:recording) { ' G stop CSV  P guest probe' } else { ' G record CSV  P guest probe' }))
+        $middle.Add('')
+        $middle.Add(' AI / CACHE  A + Enter: results')
+        $middle.Add(' AI control: not connected')
+        $middle.Add(' Saved benchmarks + offline AI')
     }
     $wrapped = New-Object 'System.Collections.Generic.List[object]'
     $latestWrapped = 0; $entryIndex = 0; $commandStart = $null; $commandEnd = $null
@@ -638,6 +676,13 @@ function Render {
         $middleText = if ($showMemory -and $row -lt $middle.Count) { $middle[$row] } else { '' }
         if ($middleText.Length -gt $middleWidth -and $showMemory) { $middleText = $middleText.Substring(0, $middleWidth - 1) + '~' }
         $middleColor = if ($middleText -match '\[REC\]') { [ConsoleColor]::Red } elseif ($middleText -match '^ (\$ |  )') { [ConsoleColor]::DarkGray } elseif ($middleText -match '^ (QNX GUEST|VM HOST|PROGRAM)') { [ConsoleColor]::Cyan } elseif ($middleText -match '^ \[#') { $memoryColor } elseif ($middleText -match '[\u2581-\u2588]') { $memoryColor } else { [ConsoleColor]::Gray }
+        if ($null -ne $script:aiChart) {
+            $middleColor = if ($middleText -match '^ AI   ') { [ConsoleColor]::Cyan }
+                elseif ($middleText -match '^ Last ') { [ConsoleColor]::Yellow }
+                elseif ($middleText -match '^ Mean ') { [ConsoleColor]::Green }
+                elseif ($middleText -match '^ (MEMORY|LATENCY)') { [ConsoleColor]::White }
+                else { [ConsoleColor]::Gray }
+        }
         $text = "$leftColor|$middleColor|$rightColor|" + $leftText.PadRight($leftWidth) + ' | ' + $(if ($showMemory) { $middleText.PadRight($middleWidth) + ' | ' } else { '' }) + $rightText.PadRight($rightWidth)
         if (-not $script:cache.ContainsKey($row) -or $script:cache[$row] -ne $text) {
             [Console]::SetCursorPosition(0, $row)
